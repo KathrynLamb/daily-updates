@@ -1,8 +1,15 @@
 import Fastify from "fastify";
+import { z } from "zod";
 
 const app = Fastify({
   logger: true,
 });
+
+const observationSchema = z.strictObject({
+    childId: z.string().trim().min(1),
+    category: z.enum(["activity", "food", "sleep", "general"]),
+    text: z.string().trim().min(1).max(1000),
+  });
 
 app.get("/health", async () => {
   return {
@@ -10,6 +17,22 @@ app.get("/health", async () => {
     service: "Daily Updates",
   };
 });
+
+app.post("/observations/validate", async (request, reply) => {
+    const result = observationSchema.safeParse(request.body);
+  
+    if (!result.success) {
+      return reply.code(400).send({
+        error: "Invalid observation",
+        issues: result.error.issues,
+      });
+    }
+  
+    return {
+      valid: true,
+      observation: result.data,
+    };
+  });
 
 try {
   await app.listen({
