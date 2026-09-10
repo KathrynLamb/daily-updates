@@ -1,10 +1,13 @@
 import Fastify from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
+import { draftRoutes } from "./drafts.js";
 
 const app = Fastify({
   logger: true,
 });
+
+app.register(draftRoutes);
 
 const observationSchema = z.strictObject({
     childId: z.string().trim().min(1),
