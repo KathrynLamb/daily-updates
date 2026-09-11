@@ -15,6 +15,7 @@ const updateParamsSchema = z.object({
   const reviseDraftSchema = z.strictObject({
     expectedRevision: z.number().int().min(1),
     text: z.string().trim().min(1).max(5000),
+    refreshSources: z.boolean().default(false),
   });
 
 export async function draftRoutes(app: FastifyInstance) {
@@ -125,8 +126,9 @@ export async function draftRoutes(app: FastifyInstance) {
       const revisions = await client.query<{
         id: string;
         revision_number: number;
+        source_snapshot: unknown[];
       }>(
-        `SELECT id, revision_number
+        `SELECT id, revision_number, source_snapshot
          FROM draft_revisions
          WHERE update_id = $1
          ORDER BY revision_number DESC
@@ -148,16 +150,45 @@ export async function draftRoutes(app: FastifyInstance) {
         });
       }
 
+      let sources = latest.source_snapshot;
+
+      if (body.data.refreshSources) {
+        const currentSources = await client.query(
+          `SELECT o.id, o.child_id,
+                  o.observation_date::text AS observation_date,
+                  o.category, o.text
+           FROM observations o
+           JOIN updates u
+             ON u.child_id = o.child_id
+            AND u.observation_date = o.observation_date
+           WHERE u.id = $1
+           ORDER BY o.created_at, o.id`,
+          [params.data.updateId]
+        );
+
+        if (currentSources.rows.length === 0) {
+          await client.query("ROLLBACK");
+          return reply.code(400).send({
+            error: "No current observations available",
+          });
+        }
+
+        sources = currentSources.rows;
+      }
+
       const result = await client.query(
         `INSERT INTO draft_revisions (
            update_id, revision_number, text, source_snapshot
          )
-         SELECT update_id, revision_number + 1, $2, source_snapshot
-         FROM draft_revisions
-         WHERE id = $1
+         VALUES ($1, $2, $3, $4::jsonb)
          RETURNING id, update_id, revision_number,
                    text, source_snapshot`,
-        [latest.id, body.data.text]
+        [
+          params.data.updateId,
+          latest.revision_number + 1,
+          body.data.text,
+          JSON.stringify(sources),
+        ]
       );
 
       await client.query("COMMIT");

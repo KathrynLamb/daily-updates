@@ -5,6 +5,7 @@ import {
   evaluateDraft,
   evaluatorVersion,
 } from "./evaluator.js";
+import { sourcesAreCurrent } from "./source-freshness.js";
 
 const paramsSchema = z.object({
   revisionId: z.uuid(),
@@ -34,10 +35,15 @@ export async function evaluationRoutes(app: FastifyInstance) {
         id: string;
         text: string;
         source_snapshot: unknown[];
+        child_id: string;
+        observation_date: string;
       }>(
-        `SELECT id, text, source_snapshot
-         FROM draft_revisions
-         WHERE id = $1`,
+        `SELECT r.id, r.text, r.source_snapshot,
+                u.child_id,
+                u.observation_date::text AS observation_date
+         FROM draft_revisions r
+         JOIN updates u ON u.id = r.update_id
+         WHERE r.id = $1`,
         [params.data.revisionId]
       );
 
@@ -74,6 +80,32 @@ export async function evaluationRoutes(app: FastifyInstance) {
         revision.source_snapshot,
         rules
       );
+
+      const currentSources = await client.query(
+        `SELECT id, child_id,
+                observation_date::text AS observation_date,
+                category, text
+         FROM observations
+         WHERE child_id = $1 AND observation_date = $2`,
+        [revision.child_id, revision.observation_date]
+      );
+
+      const current = sourcesAreCurrent(
+        revision.source_snapshot,
+        currentSources.rows
+      );
+
+      evaluation.results.push({
+        ruleId: "source_freshness",
+        outcome: current ? "pass" : "fail",
+        reason: current
+          ? "Source observations match the saved snapshot."
+          : "Source observations changed; refresh the draft sources.",
+      });
+
+      if (!current) {
+        evaluation.decision = "blocked";
+      }
 
       const runs = await client.query<{ id: string }>(
         `INSERT INTO evaluation_runs (

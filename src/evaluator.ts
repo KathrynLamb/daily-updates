@@ -9,7 +9,7 @@ type RuleResult = {
     results: RuleResult[];
   };
   
-  export const evaluatorVersion = "basic-v1";
+  export const evaluatorVersion = "basic-v2";
   
   export const initialRules = {
     maxCharacters: 1000,
