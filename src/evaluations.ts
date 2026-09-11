@@ -4,11 +4,15 @@ import { pool } from "./db.js";
 import {
   evaluateDraft,
   evaluatorVersion,
-  initialRules,
 } from "./evaluator.js";
 
 const paramsSchema = z.object({
   revisionId: z.uuid(),
+});
+
+const rulesSchema = z.strictObject({
+  maxCharacters: z.number().int().min(1).max(5000),
+  minSources: z.number().int().min(1),
 });
 
 export async function evaluationRoutes(app: FastifyInstance) {
@@ -16,7 +20,9 @@ export async function evaluationRoutes(app: FastifyInstance) {
     const params = paramsSchema.safeParse(request.params);
 
     if (!params.success) {
-      return reply.code(400).send({ error: "Invalid revision ID" });
+      return reply.code(400).send({
+        error: "Invalid revision ID",
+      });
     }
 
     const client = await pool.connect();
@@ -39,48 +45,83 @@ export async function evaluationRoutes(app: FastifyInstance) {
 
       if (!revision) {
         await client.query("ROLLBACK");
-        return reply.code(404).send({ error: "Revision not found" });
+        return reply.code(404).send({
+          error: "Revision not found",
+        });
       }
+
+      const policies = await client.query<{
+        version: number;
+        rules: unknown;
+      }>(
+        `SELECT p.version, p.rules
+         FROM active_evaluation_policy a
+         JOIN evaluation_policies p
+           ON p.version = a.policy_version
+         WHERE a.id = 1`
+      );
+
+      const policy = policies.rows[0];
+
+      if (!policy) {
+        throw new Error("No active evaluation policy");
+      }
+
+      const rules = rulesSchema.parse(policy.rules);
 
       const evaluation = evaluateDraft(
         revision.text,
         revision.source_snapshot,
-        initialRules
+        rules
       );
 
       const runs = await client.query<{ id: string }>(
         `INSERT INTO evaluation_runs (
-           draft_revision_id, evaluator_version, rules_snapshot,
-           status, decision, completed_at
+           draft_revision_id,
+           evaluator_version,
+           rules_snapshot,
+           policy_version,
+           status,
+           decision,
+           completed_at
          )
-         VALUES ($1, $2, $3::jsonb, 'completed', $4, now())
+         VALUES ($1, $2, $3::jsonb, $4, 'completed', $5, now())
          RETURNING id`,
         [
           revision.id,
           evaluatorVersion,
-          JSON.stringify(initialRules),
+          JSON.stringify(rules),
+          policy.version,
           evaluation.decision,
         ]
       );
 
-      const runId = runs.rows[0].id;
+      const run = runs.rows[0];
+
+      if (!run) {
+        throw new Error("Evaluation run was not created");
+      }
 
       for (const result of evaluation.results) {
         await client.query(
           `INSERT INTO evaluation_results (
-             evaluation_run_id, rule_id, outcome, reason
+             evaluation_run_id,
+             rule_id,
+             outcome,
+             reason
            )
            VALUES ($1, $2, $3, $4)`,
-          [runId, result.ruleId, result.outcome, result.reason]
+          [run.id, result.ruleId, result.outcome, result.reason]
         );
       }
 
       await client.query("COMMIT");
 
       return reply.code(201).send({
-        evaluationId: runId,
+        evaluationId: run.id,
         revisionId: revision.id,
         evaluatorVersion,
+        policyVersion: policy.version,
         ...evaluation,
       });
     } catch (error) {
