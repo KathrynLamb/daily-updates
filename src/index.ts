@@ -3,6 +3,7 @@ import { z } from "zod";
 import { pool } from "./db.js";
 import { draftRoutes } from "./drafts.js";
 import { evaluationRoutes } from "./evaluations.js";
+import { contentReviewRoutes } from "./content-reviews.js";
 
 const app = Fastify({
   logger: true,
@@ -10,6 +11,7 @@ const app = Fastify({
 
 app.register(draftRoutes);
 app.register(evaluationRoutes);
+app.register(contentReviewRoutes);
 
 const observationSchema = z.strictObject({
     childId: z.string().trim().min(1),

@@ -19,6 +19,7 @@
     "typescript": "5.9.3"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.125.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.12.3",
     "pg": "^8.23.0",
