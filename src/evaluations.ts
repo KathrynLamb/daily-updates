@@ -215,31 +215,32 @@ export async function evaluationRoutes(app: FastifyInstance) {
 
       evaluation.decision = decideEvaluation(evaluation.results);
 
-
       const runs = await client.query<{ id: string }>(
-          `INSERT INTO evaluation_runs (
-             draft_revision_id, evaluator_version, rules_snapshot,
-             policy_version, content_review_id,
-             status, decision, completed_at
-           )
-           VALUES ($1, $2, $3::jsonb, $4, $5, 'completed', $6, now())
-           RETURNING id`,
-          [
-            revision.id,
-            evaluatorVersion,
-            JSON.stringify(rules),
-            policy.version,
-            review?.id ?? null,
-            evaluation.decision,
-          ]
-        );
-
+        `INSERT INTO evaluation_runs (
+           draft_revision_id,
+           evaluator_version,
+           rules_snapshot,
+           policy_version,
+           content_review_id
+         )
+         VALUES ($1, $2, $3::jsonb, $4, $5)
+         RETURNING id`,
+        [
+          revision.id,
+          evaluatorVersion,
+          JSON.stringify(rules),
+          policy.version,
+          review?.id ?? null,
+        ]
+      );
+      
       const run = runs.rows[0];
-
+      
       if (!run) {
         throw new Error("Evaluation run was not created");
       }
 
+ 
       for (const result of evaluation.results) {
         await client.query(
           `INSERT INTO evaluation_results (
@@ -251,6 +252,20 @@ export async function evaluationRoutes(app: FastifyInstance) {
            VALUES ($1, $2, $3, $4)`,
           [run.id, result.ruleId, result.outcome, result.reason]
         );
+      }
+
+      const completed = await client.query(
+        `UPDATE evaluation_runs
+         SET status = 'completed',
+             decision = $2,
+             completed_at = now()
+         WHERE id = $1
+           AND status = 'running'`,
+        [run.id, evaluation.decision]
+      );
+      
+      if (completed.rowCount !== 1) {
+        throw new Error("Evaluation run was not completed");
       }
 
       await client.query("COMMIT");
