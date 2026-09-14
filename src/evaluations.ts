@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
 import {
+  decideEvaluation,
   evaluateDraft,
   evaluatorVersion,
 } from "./evaluator.js";
@@ -108,20 +109,24 @@ export async function evaluationRoutes(app: FastifyInstance) {
           : "Source observations changed; refresh the draft sources.",
       });
 
-      if (!current) {
-        evaluation.decision = "blocked";
-      }
 
-            // Select the newest matching attempt, including failures.
-      // Never silently fall back to an older passing review.
       const reviews = await client.query<{
         id: string;
         status: string;
         verdict: string | null;
         reason: string | null;
         returned_model: string | null;
+        coverage_verdict: string | null;
+        coverage_reason: string | null;
+        covered_observation_ids: string[] | null;
+        missing_observation_ids: string[] | null;
+        unknown_observation_ids: string[] | null;
       }>(
-        `SELECT id, status, verdict, reason, returned_model
+        `SELECT id, status, verdict, reason, returned_model,
+                coverage_verdict, coverage_reason,
+                covered_observation_ids,
+                missing_observation_ids,
+                unknown_observation_ids
          FROM content_reviews
          WHERE draft_revision_id = $1
            AND requested_model = $2
@@ -134,40 +139,84 @@ export async function evaluationRoutes(app: FastifyInstance) {
 
       const review = reviews.rows[0];
 
-      let groundingOutcome: "pass" | "fail" | "error" | "review"
-        = "review";
-      let groundingReason = "No completed matching content review.";
+      let groundingOutcome: "pass" | "fail" | "error" | "review" =
+        "review";
+      let groundingReason =
+        "No completed matching content review.";
+
+      let coverageOutcome: "pass" | "fail" | "error" | "review" =
+        "review";
+      let coverageReason =
+        "No completed matching content review.";
 
       if (review?.status === "error") {
         groundingOutcome = "error";
         groundingReason = "The content review failed to complete.";
+
+        coverageOutcome = "error";
+        coverageReason = "The content review failed to complete.";
       } else if (review?.status === "completed") {
         if (review.returned_model !== reviewModel) {
           groundingOutcome = "error";
-          groundingReason = "The returned model does not match the required model.";
+          groundingReason =
+            "The returned model does not match the required model.";
+
+          coverageOutcome = "error";
+          coverageReason =
+            "The returned model does not match the required model.";
         } else {
           groundingOutcome =
-            review.verdict === "supported" ? "pass"
-            : review.verdict === "unsupported" ? "fail"
-            : "review";
+            review.verdict === "supported"
+              ? "pass"
+              : review.verdict === "unsupported"
+                ? "fail"
+                : "review";
 
-          groundingReason = review.reason ?? "Content review requires attention.";
+          groundingReason =
+            review.reason ?? "Content grounding requires attention.";
+
+          const coverageEvidenceIsComplete =
+            Array.isArray(review.covered_observation_ids) &&
+            Array.isArray(review.missing_observation_ids) &&
+            Array.isArray(review.unknown_observation_ids) &&
+            review.coverage_reason !== null;
+
+          if (!coverageEvidenceIsComplete) {
+            coverageOutcome = "error";
+            coverageReason =
+              "The completed content review has incomplete coverage evidence.";
+          } else if (review.coverage_verdict === "complete") {
+            coverageOutcome = "pass";
+            coverageReason =
+            review.coverage_reason ?? "Coverage review completed.";
+          } else if (review.coverage_verdict === "incomplete") {
+            coverageOutcome = "review";
+            coverageReason =
+            review.coverage_reason ?? "Coverage review completed.";
+          } else {
+            coverageOutcome = "error";
+            coverageReason =
+              "The completed content review has an invalid coverage verdict.";
+          }
         }
       }
 
-      // Runtime gate: our code interprets the model's judgement.
       evaluation.results.push({
         ruleId: "content_grounding",
         outcome: groundingOutcome,
         reason: groundingReason,
       });
 
-      if (groundingOutcome === "fail") {
-        evaluation.decision = "blocked";
-      }
+      evaluation.results.push({
+        ruleId: "content_coverage",
+        outcome: coverageOutcome,
+        reason: coverageReason,
+      });
+
+      evaluation.decision = decideEvaluation(evaluation.results);
 
 
-        const runs = await client.query<{ id: string }>(
+      const runs = await client.query<{ id: string }>(
           `INSERT INTO evaluation_runs (
              draft_revision_id, evaluator_version, rules_snapshot,
              policy_version, content_review_id,
