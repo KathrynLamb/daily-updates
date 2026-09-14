@@ -1,6 +1,6 @@
 type RuleResult = {
     ruleId: string;
-    outcome: "pass" | "fail";
+    outcome: "pass" | "fail" | "error" | "review";
     reason: string;
   };
   
@@ -8,8 +8,7 @@ type RuleResult = {
     decision: "blocked" | "needs_review";
     results: RuleResult[];
   };
-  
-  export const evaluatorVersion = "basic-v2";
+  export const evaluatorVersion = "basic-v3";
   
   export const initialRules = {
     maxCharacters: 1000,

@@ -6,6 +6,11 @@ import {
   evaluatorVersion,
 } from "./evaluator.js";
 import { sourcesAreCurrent } from "./source-freshness.js";
+import {
+  reviewModel,
+  rubricVersion,
+  rubric,
+} from "./content-reviewer.js";
 
 const paramsSchema = z.object({
   revisionId: z.uuid(),
@@ -107,26 +112,78 @@ export async function evaluationRoutes(app: FastifyInstance) {
         evaluation.decision = "blocked";
       }
 
-      const runs = await client.query<{ id: string }>(
-        `INSERT INTO evaluation_runs (
-           draft_revision_id,
-           evaluator_version,
-           rules_snapshot,
-           policy_version,
-           status,
-           decision,
-           completed_at
-         )
-         VALUES ($1, $2, $3::jsonb, $4, 'completed', $5, now())
-         RETURNING id`,
-        [
-          revision.id,
-          evaluatorVersion,
-          JSON.stringify(rules),
-          policy.version,
-          evaluation.decision,
-        ]
+            // Select the newest matching attempt, including failures.
+      // Never silently fall back to an older passing review.
+      const reviews = await client.query<{
+        id: string;
+        status: string;
+        verdict: string | null;
+        reason: string | null;
+        returned_model: string | null;
+      }>(
+        `SELECT id, status, verdict, reason, returned_model
+         FROM content_reviews
+         WHERE draft_revision_id = $1
+           AND requested_model = $2
+           AND rubric_version = $3
+           AND rubric_text = $4
+         ORDER BY created_at DESC, id DESC
+         LIMIT 1`,
+        [revision.id, reviewModel, rubricVersion, rubric]
       );
+
+      const review = reviews.rows[0];
+
+      let groundingOutcome: "pass" | "fail" | "error" | "review"
+        = "review";
+      let groundingReason = "No completed matching content review.";
+
+      if (review?.status === "error") {
+        groundingOutcome = "error";
+        groundingReason = "The content review failed to complete.";
+      } else if (review?.status === "completed") {
+        if (review.returned_model !== reviewModel) {
+          groundingOutcome = "error";
+          groundingReason = "The returned model does not match the required model.";
+        } else {
+          groundingOutcome =
+            review.verdict === "supported" ? "pass"
+            : review.verdict === "unsupported" ? "fail"
+            : "review";
+
+          groundingReason = review.reason ?? "Content review requires attention.";
+        }
+      }
+
+      // Runtime gate: our code interprets the model's judgement.
+      evaluation.results.push({
+        ruleId: "content_grounding",
+        outcome: groundingOutcome,
+        reason: groundingReason,
+      });
+
+      if (groundingOutcome === "fail") {
+        evaluation.decision = "blocked";
+      }
+
+
+        const runs = await client.query<{ id: string }>(
+          `INSERT INTO evaluation_runs (
+             draft_revision_id, evaluator_version, rules_snapshot,
+             policy_version, content_review_id,
+             status, decision, completed_at
+           )
+           VALUES ($1, $2, $3::jsonb, $4, $5, 'completed', $6, now())
+           RETURNING id`,
+          [
+            revision.id,
+            evaluatorVersion,
+            JSON.stringify(rules),
+            policy.version,
+            review?.id ?? null,
+            evaluation.decision,
+          ]
+        );
 
       const run = runs.rows[0];
 
@@ -152,6 +209,7 @@ export async function evaluationRoutes(app: FastifyInstance) {
       return reply.code(201).send({
         evaluationId: run.id,
         revisionId: revision.id,
+        contentReviewId: review?.id ?? null,
         evaluatorVersion,
         policyVersion: policy.version,
         ...evaluation,

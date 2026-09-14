@@ -89,6 +89,11 @@ export async function contentReviewRoutes(app: FastifyInstance) {
              reason = $3,
              returned_model = $4,
              usage = $5::jsonb,
+             coverage_verdict = $6,
+             coverage_reason = $7,
+             covered_observation_ids = $8,
+             missing_observation_ids = $9,
+             unknown_observation_ids = $10,
              completed_at = now()
          WHERE id = $1`,
         [
@@ -97,6 +102,11 @@ export async function contentReviewRoutes(app: FastifyInstance) {
           review.reason,
           review.model,
           JSON.stringify(review.usage),
+          review.coverage.verdict,
+          review.coverage.reason,
+          review.coverage.covered,
+          review.coverage.missing,
+          review.coverage.unknown,
         ]
       );
 
@@ -116,6 +126,7 @@ export async function contentReviewRoutes(app: FastifyInstance) {
         `UPDATE content_reviews
          SET status = 'error',
              verdict = NULL,
+             coverage_verdict = NULL,
              error_message = $2,
              completed_at = now()
          WHERE id = $1`,
