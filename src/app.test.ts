@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildApp } from "./app.js";
+
+process.env.DATABASE_URL ??=
+  "postgresql://test:test@127.0.0.1:5432/test";
+
+process.env.ANTHROPIC_API_KEY ??= "test-only";
+
+const { buildApp } = await import("./app.js");
 
 test("health endpoint identifies the service", async (t) => {
   const app = buildApp({ logger: false });
