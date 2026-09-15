@@ -1,3 +1,4 @@
+// src/publications.ts
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
@@ -7,6 +8,7 @@ import {
   type RuleResult,
 } from "./evaluator.js";
 import { sourcesAreCurrent } from "./source-freshness.js";
+import { staffRolesFor } from "./authorization.js";
 import {
   reviewModel,
   rubric,
@@ -29,6 +31,7 @@ type PublicationRow = {
   child_id: string;
   observation_date: string;
   text_snapshot: string;
+  published_by: string | null;
   published_at: string;
 };
 
@@ -44,6 +47,15 @@ export async function publicationRoutes(app: FastifyInstance) {
         });
       }
 
+      const actor = request.actor;
+
+      if (!actor) {
+        throw new Error(
+          "Protected route reached without an authenticated actor"
+        );
+      }
+
+      const permittedRoles = staffRolesFor("publication:create");
       const client = await pool.connect();
 
       try {
@@ -87,16 +99,35 @@ export async function publicationRoutes(app: FastifyInstance) {
              ON r.id = ra.draft_revision_id
            JOIN updates u
              ON u.id = r.update_id
-           WHERE ra.id = $1`,
-          [params.data.approvalId]
+           JOIN children c
+             ON c.id = u.child_id
+           JOIN setting_memberships sm
+             ON sm.setting_id = c.setting_id
+           JOIN app_users au
+             ON au.id = sm.user_id
+           WHERE ra.id = $1
+             AND sm.user_id = $2
+             AND sm.role = ANY($3::text[])
+             AND au.disabled_at IS NULL
+           FOR SHARE OF c, sm, au`,
+          [
+            params.data.approvalId,
+            actor.userId,
+            permittedRoles,
+          ]
         );
 
         const approval = approvals.rows[0];
 
+        // Access is checked before anything else, including the
+        // idempotent retry below, so a user who has lost access
+        // cannot read back an existing publication either. A missing
+        // approval and another setting's approval get the same
+        // response, and so does a same-setting practitioner.
         if (!approval) {
           await client.query("ROLLBACK");
-          return reply.code(404).send({
-            error: "Approval not found",
+          return reply.code(403).send({
+            error: "Not permitted to publish this approval",
           });
         }
 
@@ -120,6 +151,7 @@ export async function publicationRoutes(app: FastifyInstance) {
              child_id,
              observation_date::text AS observation_date,
              text_snapshot,
+             published_by,
              published_at
            FROM published_updates
            WHERE update_id = $1`,
@@ -306,9 +338,10 @@ export async function publicationRoutes(app: FastifyInstance) {
              child_id,
              observation_date,
              text_snapshot,
-             source_snapshot
+             source_snapshot,
+             published_by
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+           VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8)
            RETURNING
              id,
              update_id,
@@ -317,6 +350,7 @@ export async function publicationRoutes(app: FastifyInstance) {
              child_id,
              observation_date::text AS observation_date,
              text_snapshot,
+             published_by,
              published_at`,
           [
             approval.update_id,
@@ -326,6 +360,7 @@ export async function publicationRoutes(app: FastifyInstance) {
             approval.observation_date,
             approval.text_snapshot,
             JSON.stringify(approval.source_snapshot),
+            actor.userId,
           ]
         );
 
@@ -362,8 +397,13 @@ export async function publicationRoutes(app: FastifyInstance) {
     }
   );
 
-  // This projection exposes published text only. Authentication and
-  // parent-child authorization will be added with the identity model.
+  // This projection exposes published text only: never drafts,
+  // sources, reviews or who approved and published.
+  //
+  // Readers are the child's linked parents and staff in the child's
+  // setting. Access and rows come from one statement, so they are
+  // read from the same snapshot. A child that does not exist gets
+  // the same response as one the user cannot read.
   app.get(
     "/children/:childId/published-updates",
     async (request, reply) => {
@@ -375,27 +415,95 @@ export async function publicationRoutes(app: FastifyInstance) {
         });
       }
 
-      const result = await pool.query<{
-        id: string;
-        child_id: string;
-        observation_date: string;
-        text: string;
-        published_at: string;
-      }>(
-        `SELECT
-           id,
-           child_id,
-           observation_date::text AS observation_date,
-           text_snapshot AS text,
-           published_at
-         FROM published_updates
-         WHERE child_id = $1
-         ORDER BY observation_date DESC, published_at DESC`,
-        [params.data.childId]
+      const actor = request.actor;
+
+      if (!actor) {
+        throw new Error(
+          "Protected route reached without an authenticated actor"
+        );
+      }
+
+      const permittedRoles = staffRolesFor(
+        "published-update:read"
       );
 
+      const result = await pool.query<{
+        allowed: boolean;
+        updates: {
+          id: string;
+          child_id: string;
+          observation_date: string;
+          text: string;
+          published_at: string;
+        }[];
+      }>(
+        `WITH access AS (
+           SELECT (
+             EXISTS (
+               SELECT 1
+               FROM children c
+               JOIN setting_memberships sm
+                 ON sm.setting_id = c.setting_id
+               JOIN app_users au
+                 ON au.id = sm.user_id
+               WHERE c.id = $2
+                 AND sm.user_id = $1
+                 AND sm.role = ANY($3::text[])
+                 AND au.disabled_at IS NULL
+             )
+             OR EXISTS (
+               SELECT 1
+               FROM parent_child_access pca
+               JOIN app_users au
+                 ON au.id = pca.user_id
+               WHERE pca.child_id = $2
+                 AND pca.user_id = $1
+                 AND au.disabled_at IS NULL
+             )
+           ) AS allowed
+         )
+         SELECT
+           access.allowed,
+           COALESCE(
+             jsonb_agg(
+               jsonb_build_object(
+                 'id', p.id,
+                 'child_id', p.child_id,
+                 'observation_date',
+                   p.observation_date::text,
+                 'text', p.text_snapshot,
+                 'published_at', p.published_at
+               )
+               ORDER BY
+                 p.observation_date DESC,
+                 p.published_at DESC,
+                 p.id
+             ) FILTER (WHERE p.id IS NOT NULL),
+             '[]'::jsonb
+           ) AS updates
+         FROM access
+         LEFT JOIN published_updates p
+           ON access.allowed
+          AND p.child_id = $2
+         GROUP BY access.allowed`,
+        [
+          actor.userId,
+          params.data.childId,
+          permittedRoles,
+        ]
+      );
+
+      const access = result.rows[0];
+
+      if (!access?.allowed) {
+        return reply.code(403).send({
+          error:
+            "Not permitted to read updates for this child",
+        });
+      }
+
       return {
-        updates: result.rows,
+        updates: access.updates,
       };
     }
   );

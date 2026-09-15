@@ -68,6 +68,13 @@ const practitionerUserId =
 const outsideApproverUserId =
   "00000000-0000-4000-8000-000000000003";
 
+// Parents have no setting membership, only explicit child links.
+const avaParentUserId =
+  "00000000-0000-4000-8000-000000000004";
+
+const otherParentUserId =
+  "00000000-0000-4000-8000-000000000005";
+
 const testUserHeader = "x-test-user-id";
 
 // Tests act as the default approver unless a request names
@@ -157,11 +164,15 @@ before(async () => {
        )
        VALUES
          ($1::uuid, $3, $1::text),
-         ($2::uuid, $3, $2::text)`,
+         ($2::uuid, $3, $2::text),
+         ($4::uuid, $3, $4::text),
+         ($5::uuid, $3, $5::text)`,
       [
         practitionerUserId,
         outsideApproverUserId,
         "https://identity.example.test",
+        avaParentUserId,
+        otherParentUserId,
       ]
     );
 
@@ -213,6 +224,22 @@ before(async () => {
         outsideApproverUserId,
         "other-setting",
         "approver",
+      ]
+    );
+
+    await pool.query(
+      `INSERT INTO parent_child_access (
+         user_id,
+         child_id
+       )
+       VALUES
+         ($1, $2),
+         ($3, $4)`,
+      [
+        avaParentUserId,
+        "integration-ava",
+        otherParentUserId,
+        "other-child",
       ]
     );
   });
@@ -642,11 +669,92 @@ test(
       false
     );
 
-    const publicationResponse = await app.inject({
+    const publicationUrl =
+      `/revision-approvals/${approval.approval.id}` +
+      "/publication";
+
+    // Publishing needs the same role as approving, in this setting.
+    for (const userId of [
+      practitionerUserId,
+      outsideApproverUserId,
+      avaParentUserId,
+    ]) {
+      const refused = await app.inject({
+        method: "POST",
+        url: publicationUrl,
+        headers: asUser(userId),
+      });
+
+      assert.equal(refused.statusCode, 403, userId);
+      assert.deepEqual(refused.json(), {
+        error: "Not permitted to publish this approval",
+      });
+    }
+
+    const missingPublication = await app.inject({
       method: "POST",
       url:
-        `/revision-approvals/${approval.approval.id}` +
+        "/revision-approvals/00000000-0000-4000-8000-00000000dead" +
         "/publication",
+    });
+
+    assert.equal(missingPublication.statusCode, 403);
+    assert.deepEqual(missingPublication.json(), {
+      error: "Not permitted to publish this approval",
+    });
+
+    // The database refuses the same publications directly.
+    for (const publishedBy of [
+      null,
+      practitionerUserId,
+      outsideApproverUserId,
+      avaParentUserId,
+    ]) {
+      await assert.rejects(
+        pool.query(
+          `INSERT INTO published_updates (
+             update_id,
+             draft_revision_id,
+             approval_id,
+             child_id,
+             observation_date,
+             text_snapshot,
+             source_snapshot,
+             published_by
+           )
+           SELECT
+             r.update_id,
+             r.id,
+             ra.id,
+             u.child_id,
+             u.observation_date,
+             r.text,
+             r.source_snapshot,
+             $2::uuid
+           FROM revision_approvals ra
+           JOIN draft_revisions r
+             ON r.id = ra.draft_revision_id
+           JOIN updates u
+             ON u.id = r.update_id
+           WHERE ra.id = $1`,
+          [approval.approval.id, publishedBy]
+        ),
+        /must record who published|not permitted to publish/
+      );
+    }
+
+    const publicationsBeforePublisher = await pool.query(
+      `SELECT id
+       FROM published_updates
+       WHERE approval_id = $1`,
+      [approval.approval.id]
+    );
+
+    assert.equal(publicationsBeforePublisher.rowCount, 0);
+
+    const publicationResponse = await app.inject({
+      method: "POST",
+      url: publicationUrl,
     });
 
     assert.equal(
@@ -658,11 +766,16 @@ test(
     const publication = publicationResponse.json<{
       publication: {
         id: string;
+        published_by: string;
       };
       created: boolean;
     }>();
 
     assert.equal(publication.created, true);
+    assert.equal(
+      publication.publication.published_by,
+      integrationUserId
+    );
 
     const publicationRetry = await app.inject({
       method: "POST",
@@ -718,6 +831,62 @@ test(
       parentUpdates[0]!.text,
       "Painted with sponges. Ate some pasta. Listened to a story."
     );
+
+    const readUrl = `/children/${childId}/published-updates`;
+
+    // Readers: Ava's linked parent, and any staff role in her setting.
+    for (const userId of [
+      avaParentUserId,
+      practitionerUserId,
+    ]) {
+      const allowed = await app.inject({
+        method: "GET",
+        url: readUrl,
+        headers: asUser(userId),
+      });
+
+      assert.equal(allowed.statusCode, 200, userId);
+      assert.deepEqual(
+        allowed.json().updates,
+        parentUpdates
+      );
+    }
+
+    // Not readers: a parent of another child, and staff elsewhere.
+    for (const userId of [
+      otherParentUserId,
+      outsideApproverUserId,
+    ]) {
+      const refused = await app.inject({
+        method: "GET",
+        url: readUrl,
+        headers: asUser(userId),
+      });
+
+      assert.equal(refused.statusCode, 403, userId);
+      assert.deepEqual(refused.json(), {
+        error: "Not permitted to read updates for this child",
+      });
+    }
+
+    // Ava's parent cannot use her link to read another child.
+    const crossChildRead = await app.inject({
+      method: "GET",
+      url: "/children/other-child/published-updates",
+      headers: asUser(avaParentUserId),
+    });
+
+    assert.equal(crossChildRead.statusCode, 403);
+
+    const missingChildRead = await app.inject({
+      method: "GET",
+      url: "/children/no-such-child/published-updates",
+    });
+
+    assert.equal(missingChildRead.statusCode, 403);
+    assert.deepEqual(missingChildRead.json(), {
+      error: "Not permitted to read updates for this child",
+    });
   }
 );
 
