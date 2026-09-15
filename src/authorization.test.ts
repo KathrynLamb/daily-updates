@@ -5,6 +5,7 @@ import {
   parentCanReadChild,
   staffCan,
   staffCapabilities,
+  staffRolesFor,
 } from "./authorization.js";
 
 test("practitioners can create daily update evidence", () => {
@@ -91,4 +92,16 @@ test("parents can read an explicitly assigned child", () => {
 
 test("parents cannot read an unassigned child", () => {
   assert.equal(parentCanReadChild(false), false);
+});
+
+test("returns only roles granted a capability", () => {
+  assert.deepEqual(
+    staffRolesFor("approval:create"),
+    ["approver", "admin"]
+  );
+
+  assert.deepEqual(
+    staffRolesFor("observation:create"),
+    ["practitioner", "approver", "admin"]
+  );
 });

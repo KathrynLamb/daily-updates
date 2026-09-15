@@ -65,3 +65,11 @@ export const staffRoles = [
   ): boolean {
     return hasExplicitChildAccess;
   }
+
+  export function staffRolesFor(
+    capability: StaffCapability
+  ): StaffRole[] {
+    return staffRoles.filter((role) =>
+      staffCan(role, capability)
+    );
+  }

@@ -53,8 +53,11 @@ const fakeReviewer: ContentReviewer = async (input) => {
   };
 };
 
+const integrationUserId =
+  "00000000-0000-4000-8000-000000000001";
+
 const fakeAuthenticator: Authenticator = async () => ({
-  userId: "00000000-0000-4000-8000-000000000001",
+  userId: integrationUserId,
   issuer: "https://identity.example.test",
   subject: "integration-user",
 });
@@ -88,6 +91,56 @@ before(async () => {
         "Ava",
       ]
     );
+    await pool.query(
+      `INSERT INTO app_users (
+         id,
+         identity_issuer,
+         identity_subject
+       )
+       VALUES ($1, $2, $3)`,
+      [
+        integrationUserId,
+        "https://identity.example.test",
+        "integration-user",
+      ]
+    );
+
+    await pool.query(
+      `INSERT INTO setting_memberships (
+         user_id,
+         setting_id,
+         role
+       )
+       VALUES ($1, $2, $3)`,
+      [
+        integrationUserId,
+        "integration-setting",
+        "approver",
+      ]
+    );
+
+    await pool.query(
+      `INSERT INTO settings (id, name)
+       VALUES ($1, $2)`,
+      [
+        "other-setting",
+        "Other Test Setting",
+      ]
+    );
+
+    await pool.query(
+      `INSERT INTO children (
+         id,
+         setting_id,
+         first_name
+       )
+       VALUES ($1, $2, $3)`,
+      [
+        "other-child",
+        "other-setting",
+        "Other Child",
+      ]
+    );
   });
 
 after(async () => {
@@ -114,6 +167,39 @@ async function createObservation(
 
   assert.equal(response.statusCode, 201, response.body);
 }
+
+test(
+  "staff cannot access a child from another setting",
+  async () => {
+    const createResponse = await app.inject({
+      method: "POST",
+      url: "/observations",
+      payload: {
+        childId: "other-child",
+        observationDate: "2026-09-22",
+        category: "activity",
+        text: "Played outside.",
+      },
+    });
+
+    assert.equal(createResponse.statusCode, 403);
+    assert.deepEqual(createResponse.json(), {
+      error:
+        "Not permitted to create observations for this child",
+    });
+
+    const readResponse = await app.inject({
+      method: "GET",
+      url: "/children/other-child/observations",
+    });
+
+    assert.equal(readResponse.statusCode, 403);
+    assert.deepEqual(readResponse.json(), {
+      error:
+        "Not permitted to read observations for this child",
+    });
+  }
+);
 
 test(
   "complete workflow publishes once and exposes only the parent snapshot",
