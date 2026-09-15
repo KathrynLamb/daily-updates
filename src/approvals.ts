@@ -1,3 +1,4 @@
+// src/approvals.ts
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
@@ -7,6 +8,7 @@ import {
   type RuleResult,
 } from "./evaluator.js";
 import { sourcesAreCurrent } from "./source-freshness.js";
+import { staffRolesFor } from "./authorization.js";
 import {
   reviewModel,
   rubric,
@@ -21,6 +23,7 @@ type ApprovalRow = {
   id: string;
   draft_revision_id: string;
   evaluation_run_id: string;
+  approved_by: string | null;
   approved_at: string;
 };
 
@@ -36,6 +39,15 @@ export async function approvalRoutes(app: FastifyInstance) {
         });
       }
 
+      const actor = request.actor;
+
+      if (!actor) {
+        throw new Error(
+          "Protected route reached without an authenticated actor"
+        );
+      }
+
+      const permittedRoles = staffRolesFor("approval:create");
       const client = await pool.connect();
 
       try {
@@ -73,16 +85,36 @@ export async function approvalRoutes(app: FastifyInstance) {
              ON r.id = er.draft_revision_id
            JOIN updates u
              ON u.id = r.update_id
-           WHERE er.id = $1`,
-          [params.data.evaluationRunId]
+           JOIN children c
+             ON c.id = u.child_id
+           JOIN setting_memberships sm
+             ON sm.setting_id = c.setting_id
+           JOIN app_users au
+             ON au.id = sm.user_id
+           WHERE er.id = $1
+             AND sm.user_id = $2
+             AND sm.role = ANY($3::text[])
+             AND au.disabled_at IS NULL
+           FOR SHARE OF c, sm, au`,
+          [
+            params.data.evaluationRunId,
+            actor.userId,
+            permittedRoles,
+          ]
         );
 
         const evaluation = evaluations.rows[0];
 
+        // Access is checked before any evidence is read, and the
+        // access rows stay locked until commit, so the approver's
+        // role cannot be revoked part-way through. A missing run
+        // and another setting's run get the same response.
+        // A practitioner in the right setting is also refused:
+        // approval is a separate capability from drafting.
         if (!evaluation) {
           await client.query("ROLLBACK");
-          return reply.code(404).send({
-            error: "Evaluation run not found",
+          return reply.code(403).send({
+            error: "Not permitted to approve this evaluation",
           });
         }
 
@@ -255,6 +287,7 @@ export async function approvalRoutes(app: FastifyInstance) {
              id,
              draft_revision_id,
              evaluation_run_id,
+             approved_by,
              approved_at
            FROM revision_approvals
            WHERE evaluation_run_id = $1`,
@@ -272,18 +305,21 @@ export async function approvalRoutes(app: FastifyInstance) {
         const inserted = await client.query<ApprovalRow>(
           `INSERT INTO revision_approvals (
              draft_revision_id,
-             evaluation_run_id
+             evaluation_run_id,
+             approved_by
            )
-           VALUES ($1, $2)
+           VALUES ($1, $2, $3)
            ON CONFLICT (evaluation_run_id) DO NOTHING
            RETURNING
              id,
              draft_revision_id,
              evaluation_run_id,
+             approved_by,
              approved_at`,
           [
             evaluation.draft_revision_id,
             evaluation.id,
+            actor.userId,
           ]
         );
 
@@ -296,6 +332,7 @@ export async function approvalRoutes(app: FastifyInstance) {
                id,
                draft_revision_id,
                evaluation_run_id,
+               approved_by,
                approved_at
              FROM revision_approvals
              WHERE evaluation_run_id = $1`,

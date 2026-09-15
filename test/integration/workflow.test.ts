@@ -60,11 +60,37 @@ const fakeReviewer: ContentReviewer = async (input) => {
 const integrationUserId =
   "00000000-0000-4000-8000-000000000001";
 
-const fakeAuthenticator: Authenticator = async () => ({
-  userId: integrationUserId,
-  issuer: "https://identity.example.test",
-  subject: "integration-user",
-});
+// A same-setting practitioner: may draft, may not approve.
+const practitionerUserId =
+  "00000000-0000-4000-8000-000000000002";
+
+// An approver, but for a different setting.
+const outsideApproverUserId =
+  "00000000-0000-4000-8000-000000000003";
+
+const testUserHeader = "x-test-user-id";
+
+// Tests act as the default approver unless a request names
+// another seeded user in the test header.
+const fakeAuthenticator: Authenticator = async (request) => {
+  const requested = request.headers[testUserHeader];
+  const userId =
+    typeof requested === "string"
+      ? requested
+      : integrationUserId;
+
+  return {
+    userId,
+    issuer: "https://identity.example.test",
+    subject: userId,
+  };
+};
+
+function asUser(userId: string) {
+  return {
+    [testUserHeader]: userId,
+  };
+}
 
 const app = buildApp({
   logger: false,
@@ -124,6 +150,36 @@ before(async () => {
     );
 
     await pool.query(
+      `INSERT INTO app_users (
+         id,
+         identity_issuer,
+         identity_subject
+       )
+       VALUES
+         ($1::uuid, $3, $1::text),
+         ($2::uuid, $3, $2::text)`,
+      [
+        practitionerUserId,
+        outsideApproverUserId,
+        "https://identity.example.test",
+      ]
+    );
+
+    await pool.query(
+      `INSERT INTO setting_memberships (
+         user_id,
+         setting_id,
+         role
+       )
+       VALUES ($1, $2, $3)`,
+      [
+        practitionerUserId,
+        "integration-setting",
+        "practitioner",
+      ]
+    );
+
+    await pool.query(
       `INSERT INTO settings (id, name)
        VALUES ($1, $2)`,
       [
@@ -143,6 +199,20 @@ before(async () => {
         "other-child",
         "other-setting",
         "Other Child",
+      ]
+    );
+
+    await pool.query(
+      `INSERT INTO setting_memberships (
+         user_id,
+         setting_id,
+         role
+       )
+       VALUES ($1, $2, $3)`,
+      [
+        outsideApproverUserId,
+        "other-setting",
+        "approver",
       ]
     );
   });
@@ -434,6 +504,95 @@ test(
     );
     assert.equal(evaluation.results.length, 5);
 
+    const approvalUrl =
+      `/evaluation-runs/${evaluation.evaluationId}` +
+      "/approval";
+
+    // A practitioner in the right setting can draft and evaluate,
+    // but approval is a separate capability.
+    const practitionerApproval = await app.inject({
+      method: "POST",
+      url: approvalUrl,
+      headers: asUser(practitionerUserId),
+    });
+
+    assert.equal(practitionerApproval.statusCode, 403);
+    assert.deepEqual(practitionerApproval.json(), {
+      error: "Not permitted to approve this evaluation",
+    });
+
+    // Holding the approver role elsewhere grants nothing here.
+    const outsideApproval = await app.inject({
+      method: "POST",
+      url: approvalUrl,
+      headers: asUser(outsideApproverUserId),
+    });
+
+    assert.equal(outsideApproval.statusCode, 403);
+    assert.deepEqual(outsideApproval.json(), {
+      error: "Not permitted to approve this evaluation",
+    });
+
+    const missingApproval = await app.inject({
+      method: "POST",
+      url:
+        "/evaluation-runs/00000000-0000-4000-8000-00000000dead" +
+        "/approval",
+    });
+
+    assert.equal(missingApproval.statusCode, 403);
+    assert.deepEqual(missingApproval.json(), {
+      error: "Not permitted to approve this evaluation",
+    });
+
+    // The database refuses the same approvals if a future code
+    // path skips the route checks.
+    const evaluationRevision = await pool.query<{
+      draft_revision_id: string;
+    }>(
+      `SELECT draft_revision_id
+       FROM evaluation_runs
+       WHERE id = $1`,
+      [evaluation.evaluationId]
+    );
+
+    const evaluatedRevisionId =
+      evaluationRevision.rows[0]?.draft_revision_id;
+
+    assert.ok(evaluatedRevisionId);
+
+    for (const approvedBy of [
+      null,
+      practitionerUserId,
+      outsideApproverUserId,
+    ]) {
+      await assert.rejects(
+        pool.query(
+          `INSERT INTO revision_approvals (
+             draft_revision_id,
+             evaluation_run_id,
+             approved_by
+           )
+           VALUES ($1, $2, $3)`,
+          [
+            evaluatedRevisionId,
+            evaluation.evaluationId,
+            approvedBy,
+          ]
+        ),
+        /must record who approved|not permitted to approve/
+      );
+    }
+
+    const approvalsBeforeApprover = await pool.query(
+      `SELECT id
+       FROM revision_approvals
+       WHERE evaluation_run_id = $1`,
+      [evaluation.evaluationId]
+    );
+
+    assert.equal(approvalsBeforeApprover.rowCount, 0);
+
     const approvalResponse = await app.inject({
       method: "POST",
       url:
@@ -450,11 +609,16 @@ test(
     const approval = approvalResponse.json<{
       approval: {
         id: string;
+        approved_by: string;
       };
       created: boolean;
     }>();
 
     assert.equal(approval.created, true);
+    assert.equal(
+      approval.approval.approved_by,
+      integrationUserId
+    );
 
     const approvalRetry = await app.inject({
       method: "POST",
