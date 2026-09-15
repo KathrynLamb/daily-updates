@@ -6,6 +6,7 @@ import {
   reviewModel,
   rubricVersion,
   rubric,
+  type ContentReviewer,
 } from "./content-reviewer.js";
 
 const paramsSchema = z.object({
@@ -19,7 +20,15 @@ const sourcesSchema = z.array(
   })
 ).min(1);
 
-export async function contentReviewRoutes(app: FastifyInstance) {
+type ContentReviewRoutesOptions = {
+  reviewer?: ContentReviewer;
+};
+
+export async function contentReviewRoutes(
+  app: FastifyInstance,
+  options: ContentReviewRoutesOptions
+) {
+  const reviewer = options.reviewer ?? reviewContent;
   app.post("/revisions/:revisionId/content-reviews", async (request, reply) => {
     const params = paramsSchema.safeParse(request.params);
 
@@ -80,7 +89,7 @@ export async function contentReviewRoutes(app: FastifyInstance) {
     try {
       // External model call: no database connection or transaction
       // is held while we wait for Claude.
-      const review = await reviewContent(input);
+      const review = await reviewer(input);
 
       await pool.query(
         `UPDATE content_reviews

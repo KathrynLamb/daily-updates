@@ -2,10 +2,11 @@ import Fastify from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
 import { approvalRoutes } from "./approvals.js";
-import { contentReviewRoutes } from "./content-reviews.js";
 import { draftRoutes } from "./drafts.js";
 import { evaluationRoutes } from "./evaluations.js";
 import { publicationRoutes } from "./publications.js";
+import { contentReviewRoutes } from "./content-reviews.js";
+import type { ContentReviewer } from "./content-reviewer.js";
 
 const observationSchema = z.strictObject({
   childId: z.string().trim().min(1),
@@ -24,6 +25,7 @@ const createObservationSchema = observationSchema.extend({
 
 type BuildAppOptions = {
   logger?: boolean;
+  reviewer?: ContentReviewer;
 };
 
 export function buildApp(
@@ -35,7 +37,9 @@ export function buildApp(
 
   app.register(draftRoutes);
   app.register(evaluationRoutes);
-  app.register(contentReviewRoutes);
+  app.register(contentReviewRoutes, {
+    reviewer: options.reviewer,
+  });
   app.register(approvalRoutes);
   app.register(publicationRoutes);
 
