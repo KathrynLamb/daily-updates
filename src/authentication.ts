@@ -1,45 +1,97 @@
-import type { FastifyRequest } from "fastify";
+import type {
+    FastifyInstance,
+    FastifyRequest,
+  } from "fastify";
 
-export type AuthenticatedActor = {
-  userId: string;
-  issuer: string;
-  subject: string;
-};
+  export type AuthenticatedActor = {
+    userId: string;
+    issuer: string;
+    subject: string;
+  };
 
-export type BearerTokenVerifier = (
-  token: string
-) => Promise<AuthenticatedActor | null>;
+  export type BearerTokenVerifier = (
+    token: string
+  ) => Promise<AuthenticatedActor | null>;
 
-export type Authenticator = (
-  request: FastifyRequest
-) => Promise<AuthenticatedActor | null>;
+  export type Authenticator = (
+    request: FastifyRequest
+  ) => Promise<AuthenticatedActor | null>;
 
-export function extractBearerToken(
-  authorizationHeader: string | string[] | undefined
-): string | null {
-  if (typeof authorizationHeader !== "string") {
-    return null;
+  declare module "fastify" {
+    interface FastifyRequest {
+      actor: AuthenticatedActor | null;
+    }
+
+    interface FastifyContextConfig {
+      public?: boolean;
+    }
   }
 
-  const match = /^Bearer ([^\s]+)$/i.exec(
-    authorizationHeader.trim()
-  );
-
-  return match?.[1] ?? null;
-}
-
-export function createBearerAuthenticator(
-  verifyToken: BearerTokenVerifier
-): Authenticator {
-  return async (request) => {
-    const token = extractBearerToken(
-      request.headers.authorization
-    );
-
-    if (!token) {
+  export function extractBearerToken(
+    authorizationHeader: string | string[] | undefined
+  ): string | null {
+    if (typeof authorizationHeader !== "string") {
       return null;
     }
 
-    return verifyToken(token);
-  };
-}
+    const match = /^Bearer ([^\s]+)$/i.exec(
+      authorizationHeader.trim()
+    );
+
+    return match?.[1] ?? null;
+  }
+
+  export function createBearerAuthenticator(
+    verifyToken: BearerTokenVerifier
+  ): Authenticator {
+    return async (request) => {
+      const token = extractBearerToken(
+        request.headers.authorization
+      );
+
+      if (!token) {
+        return null;
+      }
+
+      return verifyToken(token);
+    };
+  }
+
+  const denyAllAuthenticator: Authenticator = async () =>
+    null;
+
+  export function registerAuthentication(
+    app: FastifyInstance,
+    authenticate: Authenticator = denyAllAuthenticator
+  ) {
+    app.decorateRequest("actor", null);
+
+    app.addHook("preHandler", async (request, reply) => {
+      if (request.routeOptions.config.public === true) {
+        return;
+      }
+
+      let actor: AuthenticatedActor | null;
+
+      try {
+        actor = await authenticate(request);
+      } catch (error) {
+        request.log.error(
+          { error },
+          "Authentication service failed"
+        );
+
+        return reply.code(503).send({
+          error: "Authentication unavailable",
+        });
+      }
+
+      if (!actor) {
+        return reply.code(401).send({
+          error: "Authentication required",
+        });
+      }
+
+      request.actor = actor;
+    });
+  }

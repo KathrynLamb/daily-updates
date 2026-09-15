@@ -7,6 +7,10 @@ import { evaluationRoutes } from "./evaluations.js";
 import { publicationRoutes } from "./publications.js";
 import { contentReviewRoutes } from "./content-reviews.js";
 import type { ContentReviewer } from "./content-reviewer.js";
+import {
+  registerAuthentication,
+  type Authenticator,
+} from "./authentication.js";
 
 const observationSchema = z.strictObject({
   childId: z.string().trim().min(1),
@@ -26,6 +30,7 @@ const createObservationSchema = observationSchema.extend({
 type BuildAppOptions = {
   logger?: boolean;
   reviewer?: ContentReviewer;
+  authenticator?: Authenticator;
 };
 
 export function buildApp(
@@ -35,6 +40,11 @@ export function buildApp(
     logger: options.logger ?? true,
   });
 
+  registerAuthentication(
+    app,
+    options.authenticator
+  );
+
   app.register(draftRoutes);
   app.register(evaluationRoutes);
   app.register(contentReviewRoutes, {
@@ -43,7 +53,14 @@ export function buildApp(
   app.register(approvalRoutes);
   app.register(publicationRoutes);
 
-  app.get("/health", async () => {
+  app.get(
+    "/health",
+    {
+      config: {
+        public: true,
+      },
+    },
+    async () => {
     return {
       status: "ok",
       service: "Daily Updates",

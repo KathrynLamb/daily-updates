@@ -7,6 +7,7 @@ import {
   rubricVersion,
   type ContentReviewer,
 } from "../../src/content-reviewer.js";
+import type { Authenticator } from "../../src/authentication.js";
 
 const fakeReviewer: ContentReviewer = async (input) => {
   const draft = input.draft.toLowerCase();
@@ -52,9 +53,16 @@ const fakeReviewer: ContentReviewer = async (input) => {
   };
 };
 
+const fakeAuthenticator: Authenticator = async () => ({
+  userId: "00000000-0000-4000-8000-000000000001",
+  issuer: "https://identity.example.test",
+  subject: "integration-user",
+});
+
 const app = buildApp({
   logger: false,
   reviewer: fakeReviewer,
+  authenticator: fakeAuthenticator,
 });
 
 before(async () => {
@@ -66,7 +74,7 @@ before(async () => {
         "Integration Test Setting",
       ]
     );
-  
+
     await pool.query(
       `INSERT INTO children (
          id,
@@ -114,7 +122,7 @@ test(
     const childId = "integration-ava";
     const completeDate = "2026-09-20";
 
-  
+
 
     await createObservation(
       childId,
