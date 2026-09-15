@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test src/*.test.ts"
+    "test": "tsx --test src/*.test.ts",
+    "test:integration": "bash scripts/test-integration.sh",
+    "test:all": "npm test && npm run test:integration"
   },
   "keywords": [],
   "author": "",
