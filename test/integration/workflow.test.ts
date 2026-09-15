@@ -9,7 +9,10 @@ import {
 } from "../../src/content-reviewer.js";
 import type { Authenticator } from "../../src/authentication.js";
 
+let reviewerCallCount = 0;
+
 const fakeReviewer: ContentReviewer = async (input) => {
+  reviewerCallCount += 1;
   const draft = input.draft.toLowerCase();
 
   const covered = input.observations
@@ -198,6 +201,7 @@ test(
       error:
         "Not permitted to read observations for this child",
     });
+
     const draftResponse = await app.inject({
       method: "POST",
       url: "/drafts",
@@ -233,19 +237,27 @@ test(
 
     assert.ok(otherUpdateId);
 
-    await pool.query(
+    const otherRevision = await pool.query<{
+      id: string;
+    }>(
       `INSERT INTO draft_revisions (
          update_id,
          revision_number,
          text,
          source_snapshot
        )
-       VALUES ($1, 1, $2, '[]'::jsonb)`,
+       VALUES ($1, 1, $2, '[]'::jsonb)
+       RETURNING id`,
       [
         otherUpdateId,
         "A private draft from another setting.",
       ]
     );
+
+    const otherRevisionId =
+      otherRevision.rows[0]?.id;
+
+    assert.ok(otherRevisionId);
 
     const revisionResponse = await app.inject({
       method: "POST",
@@ -261,6 +273,26 @@ test(
     assert.deepEqual(revisionResponse.json(), {
       error: "Not permitted to revise this update",
     });
+
+    const callsBeforeUnauthorisedReview =
+      reviewerCallCount;
+
+    const reviewResponse = await app.inject({
+      method: "POST",
+      url:
+        `/revisions/${otherRevisionId}` +
+        "/content-reviews",
+    });
+
+    assert.equal(reviewResponse.statusCode, 403);
+    assert.deepEqual(reviewResponse.json(), {
+      error: "Not permitted to review this revision",
+    });
+
+    assert.equal(
+      reviewerCallCount,
+      callsBeforeUnauthorisedReview
+    );
   }
 );
 
