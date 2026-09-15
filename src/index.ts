@@ -5,6 +5,7 @@ import { draftRoutes } from "./drafts.js";
 import { evaluationRoutes } from "./evaluations.js";
 import { contentReviewRoutes } from "./content-reviews.js";
 import { approvalRoutes } from "./approvals.js";
+import { publicationRoutes } from "./publications.js";
 
 const app = Fastify({
   logger: true,
@@ -14,6 +15,7 @@ app.register(draftRoutes);
 app.register(evaluationRoutes);
 app.register(contentReviewRoutes);
 app.register(approvalRoutes);
+app.register(publicationRoutes);
 
 const observationSchema = z.strictObject({
     childId: z.string().trim().min(1),
