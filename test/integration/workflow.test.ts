@@ -1,3 +1,4 @@
+// test/integration/workflow.test.ts
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
 import { buildApp } from "../../src/app.js";
@@ -293,6 +294,41 @@ test(
       reviewerCallCount,
       callsBeforeUnauthorisedReview
     );
+
+    const evaluationResponse = await app.inject({
+      method: "POST",
+      url:
+        `/revisions/${otherRevisionId}` +
+        "/evaluations",
+    });
+
+    assert.equal(evaluationResponse.statusCode, 403);
+    assert.deepEqual(evaluationResponse.json(), {
+      error: "Not permitted to evaluate this revision",
+    });
+
+    const unauthorisedRuns = await pool.query(
+      `SELECT id
+       FROM evaluation_runs
+       WHERE draft_revision_id = $1`,
+      [otherRevisionId]
+    );
+
+    assert.equal(unauthorisedRuns.rowCount, 0);
+
+    // A revision that does not exist gets the same response,
+    // so the endpoint cannot be used to probe for valid IDs.
+    const missingEvaluationResponse = await app.inject({
+      method: "POST",
+      url:
+        "/revisions/00000000-0000-4000-8000-00000000dead" +
+        "/evaluations",
+    });
+
+    assert.equal(missingEvaluationResponse.statusCode, 403);
+    assert.deepEqual(missingEvaluationResponse.json(), {
+      error: "Not permitted to evaluate this revision",
+    });
   }
 );
 

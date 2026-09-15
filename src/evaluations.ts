@@ -1,3 +1,4 @@
+// src/evaluations.ts
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
@@ -7,6 +8,7 @@ import {
   evaluatorVersion,
 } from "./evaluator.js";
 import { sourcesAreCurrent } from "./source-freshness.js";
+import { staffRolesFor } from "./authorization.js";
 import {
   reviewModel,
   rubricVersion,
@@ -32,11 +34,28 @@ export async function evaluationRoutes(app: FastifyInstance) {
       });
     }
 
+    const actor = request.actor;
+
+    if (!actor) {
+      throw new Error(
+        "Protected route reached without an authenticated actor"
+      );
+    }
+
+    const permittedRoles = staffRolesFor("evaluation:create");
     const client = await pool.connect();
 
     try {
       await client.query("BEGIN");
 
+      // Access is checked before any evidence is read. The revision,
+      // its source snapshot, the current observations and the stored
+      // AI review all belong to one setting, so nothing below may run
+      // for a user outside it.
+      //
+      // Locking the child, membership and user rows means access
+      // cannot be revoked between this check and the evaluation
+      // being recorded.
       const revisions = await client.query<{
         id: string;
         text: string;
@@ -44,21 +63,42 @@ export async function evaluationRoutes(app: FastifyInstance) {
         child_id: string;
         observation_date: string;
       }>(
-        `SELECT r.id, r.text, r.source_snapshot,
-                u.child_id,
-                u.observation_date::text AS observation_date
+        `SELECT
+           r.id,
+           r.text,
+           r.source_snapshot,
+           u.child_id,
+           u.observation_date::text AS observation_date
          FROM draft_revisions r
-         JOIN updates u ON u.id = r.update_id
-         WHERE r.id = $1`,
-        [params.data.revisionId]
+         JOIN updates u
+           ON u.id = r.update_id
+         JOIN children c
+           ON c.id = u.child_id
+         JOIN setting_memberships sm
+           ON sm.setting_id = c.setting_id
+         JOIN app_users au
+           ON au.id = sm.user_id
+         WHERE r.id = $1
+           AND sm.user_id = $2
+           AND sm.role = ANY($3::text[])
+           AND au.disabled_at IS NULL
+         FOR SHARE OF c, sm, au`,
+        [
+          params.data.revisionId,
+          actor.userId,
+          permittedRoles,
+        ]
       );
 
       const revision = revisions.rows[0];
 
       if (!revision) {
         await client.query("ROLLBACK");
-        return reply.code(404).send({
-          error: "Revision not found",
+
+        // The same response covers both a missing revision and one
+        // belonging to another setting, avoiding ID enumeration.
+        return reply.code(403).send({
+          error: "Not permitted to evaluate this revision",
         });
       }
 
