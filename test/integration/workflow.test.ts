@@ -198,6 +198,69 @@ test(
       error:
         "Not permitted to read observations for this child",
     });
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: "/drafts",
+      payload: {
+        childId: "other-child",
+        observationDate: "2026-09-22",
+        text: "Other Child played outside.",
+      },
+    });
+
+    assert.equal(draftResponse.statusCode, 403);
+    assert.deepEqual(draftResponse.json(), {
+      error:
+        "Not permitted to create drafts for this child",
+    });
+
+    const otherUpdate = await pool.query<{
+      id: string;
+    }>(
+      `INSERT INTO updates (
+         child_id,
+         observation_date
+       )
+       VALUES ($1, $2)
+       RETURNING id`,
+      [
+        "other-child",
+        "2026-09-23",
+      ]
+    );
+
+    const otherUpdateId = otherUpdate.rows[0]?.id;
+
+    assert.ok(otherUpdateId);
+
+    await pool.query(
+      `INSERT INTO draft_revisions (
+         update_id,
+         revision_number,
+         text,
+         source_snapshot
+       )
+       VALUES ($1, 1, $2, '[]'::jsonb)`,
+      [
+        otherUpdateId,
+        "A private draft from another setting.",
+      ]
+    );
+
+    const revisionResponse = await app.inject({
+      method: "POST",
+      url: `/updates/${otherUpdateId}/revisions`,
+      payload: {
+        expectedRevision: 1,
+        text: "Attempted unauthorised revision.",
+        refreshSources: false,
+      },
+    });
+
+    assert.equal(revisionResponse.statusCode, 403);
+    assert.deepEqual(revisionResponse.json(), {
+      error: "Not permitted to revise this update",
+    });
   }
 );
 
