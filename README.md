@@ -1,5 +1,7 @@
 # Daily Updates
 
+[![CI](https://github.com/KathrynLamb/daily-updates/actions/workflows/ci.yml/badge.svg)](https://github.com/KathrynLamb/daily-updates/actions/workflows/ci.yml)
+
 A safety-first backend for turning childcare observations into reviewed, approved, and immutable parent updates.
 
 The system preserves the evidence behind every draft, uses structured AI review to assess grounding, computes observation coverage deterministically, and only publishes an exact revision after it passes evaluation and approval.
