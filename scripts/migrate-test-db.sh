@@ -2,15 +2,33 @@
 
 set -euo pipefail
 
-test_database_url="${TEST_DATABASE_URL:-postgresql://daily_updates_test:daily_updates_test@127.0.0.1:55432/daily_updates_test}"
+compose_file="${TEST_COMPOSE_FILE:-compose.test.yml}"
+
+test_container_id="$(
+  docker compose \
+    -f "$compose_file" \
+    ps \
+    -q \
+    postgres-test
+)"
+
+if [[ -z "$test_container_id" ]]; then
+  printf 'The disposable PostgreSQL container is not running.\n' >&2
+  exit 1
+fi
 
 for migration_path in db/migrations/*.sql; do
   printf 'Applying %s\n' "$migration_path"
 
-  psql "$test_database_url" \
+  docker exec \
+    -i \
+    "$test_container_id" \
+    psql \
+    -U daily_updates_test \
+    -d daily_updates_test \
     -v ON_ERROR_STOP=1 \
     --single-transaction \
-    -f "$migration_path" \
+    < "$migration_path" \
     >/dev/null
 done
 
