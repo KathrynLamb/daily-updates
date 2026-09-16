@@ -989,5 +989,238 @@ test(
       409,
       approvalResponse.body
     );
+    assert.deepEqual(approvalResponse.json(), {
+      error:
+        "Only a completed eligible evaluation can be approved",
+    });
+  }
+);
+
+// Creates two observations, a draft covering both, a review and an
+// eligible evaluation for one child and date.
+async function prepareEligibleEvaluation(observationDate: string) {
+  const childId = "integration-ava";
+
+  await createObservation(
+    childId,
+    observationDate,
+    "activity",
+    "Built a tower."
+  );
+
+  await createObservation(
+    childId,
+    observationDate,
+    "food",
+    "Ate some soup."
+  );
+
+  const text = "Built a tower. Ate some soup.";
+
+  const draftResponse = await app.inject({
+    method: "POST",
+    url: "/drafts",
+    payload: {
+      childId,
+      observationDate,
+      text,
+    },
+  });
+
+  assert.equal(draftResponse.statusCode, 201, draftResponse.body);
+
+  const draft = draftResponse.json<{
+    draft: {
+      id: string;
+      update_id: string;
+    };
+  }>().draft;
+
+  const reviewResponse = await app.inject({
+    method: "POST",
+    url: `/revisions/${draft.id}/content-reviews`,
+  });
+
+  assert.equal(reviewResponse.statusCode, 201, reviewResponse.body);
+
+  const evaluationResponse = await app.inject({
+    method: "POST",
+    url: `/revisions/${draft.id}/evaluations`,
+  });
+
+  assert.equal(
+    evaluationResponse.statusCode,
+    201,
+    evaluationResponse.body
+  );
+
+  const evaluation = evaluationResponse.json<{
+    evaluationId: string;
+    decision: string;
+  }>();
+
+  assert.equal(evaluation.decision, "eligible");
+
+  return {
+    childId,
+    observationDate,
+    text,
+    updateId: draft.update_id,
+    evaluationId: evaluation.evaluationId,
+  };
+}
+
+async function approve(evaluationId: string) {
+  return app.inject({
+    method: "POST",
+    url: `/evaluation-runs/${evaluationId}/approval`,
+  });
+}
+
+async function publish(approvalId: string) {
+  return app.inject({
+    method: "POST",
+    url: `/revision-approvals/${approvalId}/publication`,
+  });
+}
+
+async function reviseWithoutRefresh(updateId: string, text: string) {
+  const response = await app.inject({
+    method: "POST",
+    url: `/updates/${updateId}/revisions`,
+    payload: {
+      expectedRevision: 1,
+      text,
+      refreshSources: false,
+    },
+  });
+
+  assert.equal(response.statusCode, 201, response.body);
+}
+
+async function publicationCountFor(updateId: string) {
+  const result = await pool.query(
+    `SELECT id
+     FROM published_updates
+     WHERE update_id = $1`,
+    [updateId]
+  );
+
+  return result.rowCount;
+}
+
+test(
+  "approval refuses evidence that changed after evaluation",
+  async () => {
+    const withNewObservation =
+      await prepareEligibleEvaluation("2026-10-01");
+
+    await createObservation(
+      withNewObservation.childId,
+      withNewObservation.observationDate,
+      "sleep",
+      "Napped after lunch."
+    );
+
+    const staleSources = await approve(
+      withNewObservation.evaluationId
+    );
+
+    assert.equal(staleSources.statusCode, 409, staleSources.body);
+    assert.deepEqual(staleSources.json(), {
+      error:
+        "The source observations have changed since evaluation",
+    });
+
+    const withNewRevision =
+      await prepareEligibleEvaluation("2026-10-02");
+
+    await reviseWithoutRefresh(
+      withNewRevision.updateId,
+      withNewRevision.text
+    );
+
+    const staleRevision = await approve(
+      withNewRevision.evaluationId
+    );
+
+    assert.equal(staleRevision.statusCode, 409, staleRevision.body);
+    assert.deepEqual(staleRevision.json(), {
+      error:
+        "The evaluation is not for the latest draft revision",
+    });
+  }
+);
+
+test(
+  "publication refuses evidence that changed after approval",
+  async () => {
+    const withNewObservation =
+      await prepareEligibleEvaluation("2026-10-03");
+
+    const firstApproval = await approve(
+      withNewObservation.evaluationId
+    );
+
+    assert.equal(
+      firstApproval.statusCode,
+      201,
+      firstApproval.body
+    );
+
+    await createObservation(
+      withNewObservation.childId,
+      withNewObservation.observationDate,
+      "sleep",
+      "Napped after lunch."
+    );
+
+    const staleSources = await publish(
+      firstApproval.json().approval.id
+    );
+
+    assert.equal(staleSources.statusCode, 409, staleSources.body);
+    assert.deepEqual(staleSources.json(), {
+      error:
+        "The source observations have changed since approval",
+    });
+
+    assert.equal(
+      await publicationCountFor(withNewObservation.updateId),
+      0
+    );
+
+    const withNewRevision =
+      await prepareEligibleEvaluation("2026-10-04");
+
+    const secondApproval = await approve(
+      withNewRevision.evaluationId
+    );
+
+    assert.equal(
+      secondApproval.statusCode,
+      201,
+      secondApproval.body
+    );
+
+    await reviseWithoutRefresh(
+      withNewRevision.updateId,
+      withNewRevision.text
+    );
+
+    const staleRevision = await publish(
+      secondApproval.json().approval.id
+    );
+
+    assert.equal(staleRevision.statusCode, 409, staleRevision.body);
+    assert.deepEqual(staleRevision.json(), {
+      error:
+        "The approval is not for the latest draft revision",
+    });
+
+    assert.equal(
+      await publicationCountFor(withNewRevision.updateId),
+      0
+    );
   }
 );
