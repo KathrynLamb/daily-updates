@@ -1,3 +1,4 @@
+// src/app.ts
 import Fastify from "fastify";
 import { approvalRoutes } from "./approvals.js";
 import { draftRoutes } from "./drafts.js";
@@ -5,7 +6,9 @@ import { evaluationRoutes } from "./evaluations.js";
 import { publicationRoutes } from "./publications.js";
 import { observationRoutes } from "./observations.js";
 import { contentReviewRoutes } from "./content-reviews.js";
+import { generationRoutes } from "./generations.js";
 import type { ContentReviewer } from "./content-reviewer.js";
+import type { DraftGenerator } from "./draft-generator.js";
 import {
   registerAuthentication,
   type Authenticator,
@@ -14,6 +17,7 @@ import {
 type BuildAppOptions = {
   logger?: boolean;
   reviewer?: ContentReviewer;
+  generator?: DraftGenerator;
   authenticator?: Authenticator;
 };
 
@@ -46,6 +50,9 @@ export function buildApp(
 
   app.register(observationRoutes);
   app.register(draftRoutes);
+  app.register(generationRoutes, {
+    generator: options.generator,
+  });
   app.register(evaluationRoutes);
   app.register(contentReviewRoutes, {
     reviewer: options.reviewer,

@@ -5,7 +5,7 @@
 
 A safety-first backend for turning childcare observations into reviewed, approved, and immutable parent updates.
 
-The service preserves the evidence behind every draft, uses structured AI review to assess whether claims are grounded, calculates observation coverage deterministically, and publishes only an exact revision that has passed evaluation and received human approval.
+Claude writes the first draft from a practitioner's observations. The service preserves the evidence behind every draft, uses a separate structured AI review to assess whether claims are grounded, calculates observation coverage deterministically, and publishes only an exact revision that has passed evaluation and received human approval.
 
 Authentication, tenant isolation, role-based authorization, actor attribution, and database constraints protect every stage of the workflow.
 
@@ -16,13 +16,14 @@ Daily updates contain sensitive information and are read by families as factual 
 This project treats AI review as one piece of evidence inside a controlled workflow:
 
 1. A practitioner records observations.
-2. A draft revision captures an immutable snapshot of its sources.
-3. Claude checks whether the draft’s claims are grounded in those observations.
-4. Application code calculates whether every observation was covered.
-5. Deterministic evaluation rules decide whether the revision is eligible.
-6. An approver in the child’s setting approves that exact eligible evaluation.
-7. An approver or administrator publishes an immutable snapshot.
-8. Only authorized staff and explicitly linked parents can read the published update.
+2. Claude writes a draft from those observations, or a practitioner writes one by hand.
+3. The draft revision captures an immutable snapshot of its sources.
+4. A separate Claude review checks whether the draft’s claims are grounded in those observations.
+5. Application code calculates whether every observation was covered.
+6. Deterministic evaluation rules decide whether the revision is eligible.
+7. An approver in the child’s setting approves that exact eligible evaluation.
+8. An approver or administrator publishes an immutable snapshot.
+9. Only authorized staff and explicitly linked parents can read the published update.
 
 ## Safety properties
 
@@ -36,6 +37,9 @@ This project treats AI review as one piece of evidence inside a controlled workf
 - Invalid structured output is rejected locally before it can be stored.
 - Missing, stale, malformed, duplicate, or unknown evaluation results cannot produce eligibility.
 - Provider failures never become passing content reviews.
+- Every draft generation attempt is recorded with who requested it, the model, the prompt, and exactly what the model was sent, and cannot be changed once finished.
+- A revision marked as generated must contain exactly the text the model returned, from exactly the observations it was given. PostgreSQL enforces this.
+- Failed or incomplete generations never become drafts.
 
 ### Approval and publication
 
@@ -106,6 +110,7 @@ The capability mapping lives in `src/authorization.ts`. PostgreSQL repeats the c
 | Authorization | Maps staff roles to capabilities and parents to explicitly linked children |
 | Observations | Stores the source facts recorded for a child and date |
 | Draft revisions | Preserves draft text and the exact source snapshot used to create it |
+| Draft generation | Asks Claude for a draft and records every attempt |
 | Content reviews | Stores structured grounding evidence returned by Claude |
 | Coverage resolver | Computes covered, missing, and unknown observation IDs |
 | Evaluations | Combines deterministic rules with content-review evidence |
@@ -126,6 +131,26 @@ An evaluation becomes `eligible` only when all five required rules pass:
 A failed rule produces `blocked`.
 
 A missing, unknown, duplicate, errored, or review-required result produces `needs_review`. The application therefore cannot grant eligibility merely because the rules it happened to receive passed.
+
+## Draft generation
+
+`POST /drafts/generate` writes a first draft for a child and date. `POST /updates/:updateId/generations` writes a new revision from the current observations.
+
+Claude receives only the child's first name, the date, and the observations. The prompt (`src/generation-schema.ts`) requires every observation to be included, forbids facts that are not in them, applies the same rule on feelings and motives as the reviewer, keeps other children anonymous, and treats observation text as data rather than instructions. The prompt is versioned, and the version and full text are stored with every generation.
+
+Generation and review are separate calls with separate prompts and different models, so the model does not mark its own work.
+
+Each request runs in three steps, so no database transaction is held open while the model is writing:
+
+1. Check access, collect the observations, and record the attempt.
+2. Call the model and record either the draft or the failure.
+3. Check access and the latest revision again, then save the draft.
+
+If a colleague saves a revision while the model is writing, their edit stands. The generated text is kept as history and the request returns `409`.
+
+A generated draft then goes through exactly the same review, evaluation, approval, and publication as a hand-written one.
+
+To try the real models, run `npx tsx src/check-generation.ts`. It generates drafts for a few difficult cases (another child named, a negation, an injury, an instruction hidden in an observation) and reviews each one. It calls the Anthropic API.
 
 ## Structured AI review
 
@@ -164,6 +189,7 @@ The migrations in `db/migrations` build the database in order and include protec
 - immutable completed content reviews;
 - immutable completed evaluation runs and results;
 - who recorded each observation, saved each draft revision, and requested each AI review and evaluation;
+- an immutable history of every draft generation attempt, and generated revisions that must match their generation exactly;
 - actor-attributed approvals;
 - actor-attributed publications;
 - tenant memberships and parent-child access;
@@ -193,10 +219,10 @@ npm run test:all
 
 `test:all` runs:
 
-- 76 deterministic unit and route tests;
+- 90 deterministic unit and route tests;
 - a disposable PostgreSQL container;
 - every migration against a clean database;
-- 8 end-to-end database workflow tests.
+- 13 end-to-end database workflow tests.
 
 The integration tests cover:
 
@@ -210,9 +236,14 @@ The integration tests cover:
 - parent reads limited to explicitly linked children;
 - refusal to publish from an unattributed historical approval;
 - evaluation that sends a review citing unsupplied observation IDs to human review;
-- attribution of every observation, revision, review, and evaluation to the person who created it.
+- attribution of every observation, revision, review, and evaluation to the person who created it;
+- a Claude-written draft passing through review, approval, publication, and a parent read;
+- failed generations recorded without creating a draft;
+- generation refused before the model is called for other settings, parents, existing updates, and dates without observations;
+- regeneration that uses current observations and never overwrites an edit saved while the model was writing;
+- database refusal of generated revisions that do not match their generation.
 
-Tests inject a deterministic content reviewer and test authenticator. They do not call the live Anthropic API or a live identity provider.
+Tests inject a deterministic draft generator, content reviewer, and test authenticator. They do not call the live Anthropic API or a live identity provider.
 
 ## Running the service locally
 
@@ -253,7 +284,9 @@ All business endpoints require a bearer token from the configured identity provi
 | --- | --- | --- |
 | Create observation | `POST /observations` | Staff in the child’s setting |
 | Read observations | `GET /children/:childId/observations` | Staff in the child’s setting |
-| Create initial draft | `POST /drafts` | Staff in the child’s setting |
+| Generate initial draft | `POST /drafts/generate` | Staff in the child’s setting |
+| Generate new revision | `POST /updates/:updateId/generations` | Staff in the child’s setting |
+| Create initial draft by hand | `POST /drafts` | Staff in the child’s setting |
 | Create draft revision | `POST /updates/:updateId/revisions` | Staff in the child’s setting |
 | Review content | `POST /revisions/:revisionId/content-reviews` | Staff in the child’s setting |
 | Evaluate revision | `POST /revisions/:revisionId/evaluations` | Staff in the child’s setting |
@@ -275,13 +308,14 @@ The CI badge at the top of this file links to the latest workflow results.
 
 ## Current scope and known limitations
 
-This repository demonstrates the core evidence, review, authorization, approval, and publishing workflow. It is not presented as a complete deployed childcare product.
+This repository demonstrates the core generation, evidence, review, authorization, approval, and publishing workflow. It is not presented as a complete deployed childcare product.
 
 Known limitations include:
 
 - An OIDC/JWKS verifier is implemented, but a specific production identity-provider tenant is not provisioned in this repository.
 - Users, setting memberships, roles, and parent-child links are administered directly in PostgreSQL; there is no user-administration interface.
-- The AI evaluation set contains 11 cases and each baseline currently represents one run.
+- The AI review evaluation set contains 11 cases and each baseline currently represents one run. Draft generation has a live smoke check but no scored evaluation set yet.
+- Generation has no rate limit or per-setting cost control.
 - There is no frontend client in this repository.
 - Rate limiting, production observability, backups, operational alerting, and secrets management remain deployment responsibilities.
 

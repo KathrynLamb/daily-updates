@@ -9,6 +9,8 @@ import {
   type ContentReviewer,
 } from "../../src/content-reviewer.js";
 import type { Authenticator } from "../../src/authentication.js";
+import type { DraftGenerator } from "../../src/draft-generator.js";
+import type { GenerationInput } from "../../src/generation-schema.js";
 
 let reviewerCallCount = 0;
 
@@ -65,6 +67,43 @@ const fakeReviewer: ContentReviewer = async (input) => {
   };
 };
 
+// The fake generator writes every observation into the draft, so the
+// fake reviewer finds full coverage. Tests can make it fail, or run
+// code while it is "writing" to simulate a concurrent edit.
+const generatorCalls: GenerationInput[] = [];
+
+let generatorFailure: Error | null = null;
+let whileGenerating: (() => Promise<void>) | null = null;
+
+const fakeGenerator: DraftGenerator = async (input) => {
+  generatorCalls.push(input);
+
+  if (whileGenerating) {
+    await whileGenerating();
+  }
+
+  if (generatorFailure) {
+    throw generatorFailure;
+  }
+
+  return {
+    text: input.observations
+      .map((observation) => observation.text)
+      .join(" "),
+    model: "fake-generation-model",
+    promptVersion: "fake-prompt",
+    usage: {
+      input_tokens: 0,
+      output_tokens: 0,
+    },
+  };
+};
+
+function resetGenerator() {
+  generatorFailure = null;
+  whileGenerating = null;
+}
+
 const integrationUserId =
   "00000000-0000-4000-8000-000000000001";
 
@@ -110,6 +149,7 @@ function asUser(userId: string) {
 const app = buildApp({
   logger: false,
   reviewer: fakeReviewer,
+  generator: fakeGenerator,
   authenticator: fakeAuthenticator,
 });
 
@@ -1656,5 +1696,660 @@ test(
       ),
       /draft_revisions_created_by_required/
     );
+  }
+);
+type GeneratedDraft = {
+  generationId: string;
+  draft: {
+    id: string;
+    update_id: string;
+    revision_number: number;
+    text: string;
+    source_snapshot: { id: string }[];
+    created_by: string;
+    generation_id: string;
+  };
+};
+
+async function generateFirstDraft(
+  childId: string,
+  observationDate: string,
+  userId: string = practitionerUserId
+) {
+  return app.inject({
+    method: "POST",
+    url: "/drafts/generate",
+    headers: asUser(userId),
+    payload: {
+      childId,
+      observationDate,
+    },
+  });
+}
+
+async function regenerate(
+  updateId: string,
+  expectedRevision: number,
+  userId: string = practitionerUserId
+) {
+  return app.inject({
+    method: "POST",
+    url: `/updates/${updateId}/generations`,
+    headers: asUser(userId),
+    payload: {
+      expectedRevision,
+    },
+  });
+}
+
+async function generationRow(generationId: string) {
+  const rows = await pool.query<{
+    status: string;
+    child_id: string;
+    update_id: string | null;
+    requested_by: string;
+    requested_model: string;
+    returned_model: string | null;
+    prompt_version: string;
+    output_text: string | null;
+    error_message: string | null;
+    input_snapshot: GenerationInput;
+    source_snapshot: { id: string }[];
+  }>(
+    `SELECT
+       status,
+       child_id,
+       update_id,
+       requested_by,
+       requested_model,
+       returned_model,
+       prompt_version,
+       output_text,
+       error_message,
+       input_snapshot,
+       source_snapshot
+     FROM draft_generations
+     WHERE id = $1`,
+    [generationId]
+  );
+
+  const row = rows.rows[0];
+  assert.ok(row, `No generation ${generationId}`);
+  return row;
+}
+
+test(
+  "a Claude-written draft goes through review, approval and publication",
+  async () => {
+    resetGenerator();
+
+    const childId = "integration-ava";
+    const observationDate = "2026-10-08";
+
+    await createObservation(
+      childId,
+      observationDate,
+      "activity",
+      "Painted a rainbow.",
+      practitionerUserId
+    );
+
+    await createObservation(
+      childId,
+      observationDate,
+      "food",
+      "Ate all of her fish pie.",
+      practitionerUserId
+    );
+
+    const callsBefore = generatorCalls.length;
+    const response = await generateFirstDraft(childId, observationDate);
+
+    assert.equal(response.statusCode, 201, response.body);
+
+    const { generationId, draft } = response.json<GeneratedDraft>();
+
+    assert.equal(generatorCalls.length, callsBefore + 1);
+
+    // The model is given the child's first name, the date and the
+    // observations, and nothing else.
+    const input = generatorCalls.at(-1);
+
+    assert.ok(input);
+    assert.deepEqual(Object.keys(input).sort(), [
+      "childName",
+      "observationDate",
+      "observations",
+    ]);
+    assert.equal(input.childName, "Ava");
+    assert.equal(input.observationDate, observationDate);
+    assert.deepEqual(
+      input.observations.map((observation) => observation.text),
+      ["Painted a rainbow.", "Ate all of her fish pie."]
+    );
+
+    assert.equal(draft.revision_number, 1);
+    assert.equal(
+      draft.text,
+      "Painted a rainbow. Ate all of her fish pie."
+    );
+    assert.equal(draft.generation_id, generationId);
+    assert.equal(draft.created_by, practitionerUserId);
+
+    const generation = await generationRow(generationId);
+
+    assert.equal(generation.status, "completed");
+    assert.equal(generation.update_id, null);
+    assert.equal(generation.requested_by, practitionerUserId);
+    assert.equal(generation.returned_model, "fake-generation-model");
+    assert.equal(generation.output_text, draft.text);
+    assert.deepEqual(generation.input_snapshot, input);
+    assert.deepEqual(
+      generation.source_snapshot,
+      draft.source_snapshot
+    );
+
+    // From here the generated draft is treated like any other.
+    const reviewResponse = await app.inject({
+      method: "POST",
+      url: `/revisions/${draft.id}/content-reviews`,
+      headers: asUser(practitionerUserId),
+    });
+
+    assert.equal(reviewResponse.statusCode, 201, reviewResponse.body);
+
+    const evaluationResponse = await app.inject({
+      method: "POST",
+      url: `/revisions/${draft.id}/evaluations`,
+      headers: asUser(practitionerUserId),
+    });
+
+    assert.equal(
+      evaluationResponse.statusCode,
+      201,
+      evaluationResponse.body
+    );
+
+    const evaluation = evaluationResponse.json<{
+      evaluationId: string;
+      decision: string;
+    }>();
+
+    assert.equal(evaluation.decision, "eligible");
+
+    const approvalResponse = await approve(evaluation.evaluationId);
+
+    assert.equal(
+      approvalResponse.statusCode,
+      201,
+      approvalResponse.body
+    );
+
+    const publicationResponse = await publish(
+      approvalResponse.json().approval.id
+    );
+
+    assert.equal(
+      publicationResponse.statusCode,
+      201,
+      publicationResponse.body
+    );
+
+    const parentRead = await app.inject({
+      method: "GET",
+      url: `/children/${childId}/published-updates`,
+      headers: asUser(avaParentUserId),
+    });
+
+    assert.equal(parentRead.statusCode, 200, parentRead.body);
+    assert.ok(
+      parentRead
+        .json<{ updates: { text: string }[] }>()
+        .updates.some((update) => update.text === draft.text)
+    );
+  }
+);
+
+test(
+  "a failed generation is recorded and saves no draft",
+  async () => {
+    resetGenerator();
+    generatorFailure = new TypeError("Model unavailable");
+
+    const childId = "integration-ava";
+    const observationDate = "2026-10-09";
+
+    await createObservation(
+      childId,
+      observationDate,
+      "sleep",
+      "Slept for an hour."
+    );
+
+    const response = await generateFirstDraft(childId, observationDate);
+
+    assert.equal(response.statusCode, 502, response.body);
+
+    const { generationId } = response.json<{
+      generationId: string;
+    }>();
+
+    assert.deepEqual(response.json(), {
+      error: "Draft generation failed",
+      generationId,
+    });
+
+    const generation = await generationRow(generationId);
+
+    assert.equal(generation.status, "error");
+    assert.equal(generation.output_text, null);
+
+    // Only the error category is stored, never the error text.
+    assert.equal(
+      generation.error_message,
+      "Generation failed (TypeError)"
+    );
+
+    const updates = await pool.query(
+      `SELECT id
+       FROM updates
+       WHERE child_id = $1
+         AND observation_date = $2`,
+      [childId, observationDate]
+    );
+
+    assert.equal(updates.rowCount, 0);
+
+    // The failure does not block a later attempt.
+    resetGenerator();
+
+    const retry = await generateFirstDraft(childId, observationDate);
+
+    assert.equal(retry.statusCode, 201, retry.body);
+  }
+);
+
+test(
+  "generation is refused before the model is called",
+  async () => {
+    resetGenerator();
+
+    const callsBefore = generatorCalls.length;
+
+    await pool.query(
+      `INSERT INTO observations (
+         child_id,
+         observation_date,
+         category,
+         text,
+         recorded_by
+       )
+       VALUES ($1, $2, 'activity', 'Played outside.', $3)`,
+      ["other-child", "2026-10-10", outsideApproverUserId]
+    );
+
+    // A date that already has a hand-written draft.
+    await createObservation(
+      "integration-ava",
+      "2026-10-14",
+      "activity",
+      "Read a book."
+    );
+
+    const existingDraft = await app.inject({
+      method: "POST",
+      url: "/drafts",
+      payload: {
+        childId: "integration-ava",
+        observationDate: "2026-10-14",
+        text: "Read a book.",
+      },
+    });
+
+    assert.equal(existingDraft.statusCode, 201, existingDraft.body);
+
+    const refusals: [
+      string,
+      Awaited<ReturnType<typeof app.inject>>,
+      number,
+    ][] = [
+      [
+        "another setting's child",
+        await generateFirstDraft("other-child", "2026-10-10"),
+        403,
+      ],
+      [
+        "a child that does not exist",
+        await generateFirstDraft("no-such-child", "2026-10-10"),
+        403,
+      ],
+      [
+        "a parent",
+        await generateFirstDraft(
+          "integration-ava",
+          "2026-10-10",
+          avaParentUserId
+        ),
+        403,
+      ],
+      [
+        "a date that already has an update",
+        await generateFirstDraft("integration-ava", "2026-10-14"),
+        409,
+      ],
+      [
+        "a date with no observations",
+        await generateFirstDraft("integration-ava", "2026-10-11"),
+        400,
+      ],
+    ];
+
+    for (const [name, response, statusCode] of refusals) {
+      assert.equal(response.statusCode, statusCode, name);
+    }
+
+    const otherUpdate = await pool.query<{ id: string }>(
+      `SELECT id
+       FROM updates
+       WHERE child_id = 'other-child'
+       LIMIT 1`
+    );
+
+    const otherUpdateId = otherUpdate.rows[0]?.id;
+    assert.ok(otherUpdateId);
+
+    const otherRegeneration = await regenerate(otherUpdateId, 1);
+
+    assert.equal(otherRegeneration.statusCode, 403);
+    assert.deepEqual(otherRegeneration.json(), {
+      error: "Not permitted to revise this update",
+    });
+
+    const missingRegeneration = await regenerate(
+      "00000000-0000-4000-8000-00000000dead",
+      1
+    );
+
+    assert.equal(missingRegeneration.statusCode, 403);
+
+    // Nothing was sent to the model and nothing was recorded.
+    assert.equal(generatorCalls.length, callsBefore);
+
+    const otherGenerations = await pool.query(
+      `SELECT id
+       FROM draft_generations
+       WHERE child_id <> 'integration-ava'
+          OR observation_date IN ('2026-10-10', '2026-10-11')`
+    );
+
+    assert.equal(otherGenerations.rowCount, 0);
+  }
+);
+
+test(
+  "regeneration uses current observations and never overwrites an edit",
+  async () => {
+    resetGenerator();
+
+    const childId = "integration-ava";
+    const observationDate = "2026-10-12";
+
+    await createObservation(
+      childId,
+      observationDate,
+      "activity",
+      "Built a den."
+    );
+
+    const first = await generateFirstDraft(childId, observationDate);
+
+    assert.equal(first.statusCode, 201, first.body);
+
+    const updateId = first.json<GeneratedDraft>().draft.update_id;
+
+    await createObservation(
+      childId,
+      observationDate,
+      "food",
+      "Ate some apple."
+    );
+
+    const second = await regenerate(updateId, 1);
+
+    assert.equal(second.statusCode, 201, second.body);
+
+    const regenerated = second.json<GeneratedDraft>();
+
+    assert.equal(regenerated.draft.revision_number, 2);
+    assert.equal(
+      regenerated.draft.text,
+      "Built a den. Ate some apple."
+    );
+    assert.equal(regenerated.draft.source_snapshot.length, 2);
+    assert.equal(
+      (await generationRow(regenerated.generationId)).update_id,
+      updateId
+    );
+
+    // A stale request is refused without calling the model.
+    const callsBefore = generatorCalls.length;
+    const stale = await regenerate(updateId, 1);
+
+    assert.equal(stale.statusCode, 409, stale.body);
+    assert.deepEqual(stale.json(), {
+      error: "This draft has changed. Load the latest revision.",
+      currentRevision: 2,
+    });
+    assert.equal(generatorCalls.length, callsBefore);
+
+    // Someone saves an edit while the model is writing. Their edit
+    // stands, and the generated text is kept only as history.
+    whileGenerating = async () => {
+      whileGenerating = null;
+
+      const edit = await app.inject({
+        method: "POST",
+        url: `/updates/${updateId}/revisions`,
+        payload: {
+          expectedRevision: 2,
+          text: "Built a den and ate some apple.",
+          refreshSources: false,
+        },
+      });
+
+      assert.equal(edit.statusCode, 201, edit.body);
+    };
+
+    const raced = await regenerate(updateId, 2);
+
+    assert.equal(raced.statusCode, 409, raced.body);
+
+    const racedBody = raced.json<{
+      currentRevision: number;
+      generationId: string;
+    }>();
+
+    assert.equal(racedBody.currentRevision, 3);
+    assert.equal(
+      (await generationRow(racedBody.generationId)).status,
+      "completed"
+    );
+
+    const latest = await pool.query<{
+      revision_number: number;
+      text: string;
+      generation_id: string | null;
+    }>(
+      `SELECT revision_number, text, generation_id
+       FROM draft_revisions
+       WHERE update_id = $1
+       ORDER BY revision_number DESC
+       LIMIT 1`,
+      [updateId]
+    );
+
+    assert.deepEqual(latest.rows[0], {
+      revision_number: 3,
+      text: "Built a den and ate some apple.",
+      generation_id: null,
+    });
+  }
+);
+
+test(
+  "the database only links a revision to a matching generation",
+  async () => {
+    resetGenerator();
+
+    const childId = "integration-ava";
+    const observationDate = "2026-10-13";
+
+    await createObservation(
+      childId,
+      observationDate,
+      "general",
+      "Waved goodbye."
+    );
+
+    const first = await generateFirstDraft(childId, observationDate);
+
+    assert.equal(first.statusCode, 201, first.body);
+
+    const { draft } = first.json<GeneratedDraft>();
+
+    // Produce a completed generation that was never saved, by editing
+    // the draft while the model is writing.
+    whileGenerating = async () => {
+      whileGenerating = null;
+
+      const edit = await app.inject({
+        method: "POST",
+        url: `/updates/${draft.update_id}/revisions`,
+        headers: asUser(practitionerUserId),
+        payload: {
+          expectedRevision: 1,
+          text: "Waved goodbye at home time.",
+          refreshSources: false,
+        },
+      });
+
+      assert.equal(edit.statusCode, 201, edit.body);
+    };
+
+    const raced = await regenerate(draft.update_id, 1);
+
+    assert.equal(raced.statusCode, 409, raced.body);
+
+    const unusedId = raced.json<{ generationId: string }>().generationId;
+    const unused = await generationRow(unusedId);
+
+    const insertRevision = (
+      text: string | null,
+      createdBy: string,
+      generationId: string
+    ) =>
+      pool.query(
+        `INSERT INTO draft_revisions (
+           update_id,
+           revision_number,
+           text,
+           source_snapshot,
+           created_by,
+           generation_id
+         )
+         SELECT
+           $1,
+           3,
+           COALESCE($2, g.output_text),
+           g.source_snapshot,
+           $3,
+           g.id
+         FROM draft_generations g
+         WHERE g.id = $4`,
+        [draft.update_id, text, createdBy, generationId]
+      );
+
+    await assert.rejects(
+      insertRevision(
+        "Waved goodbye and cried.",
+        practitionerUserId,
+        unusedId
+      ),
+      /must match the generation exactly/
+    );
+
+    await assert.rejects(
+      insertRevision(null, integrationUserId, unusedId),
+      /saved by whoever requested it/
+    );
+
+    // A generation already used for revision 1 cannot be reused.
+    await assert.rejects(
+      insertRevision(
+        null,
+        practitionerUserId,
+        draft.generation_id
+      ),
+      /draft_revisions_generation_unique/
+    );
+
+    // A failed generation cannot produce a revision.
+    generatorFailure = new Error("Model unavailable");
+
+    const failedResponse = await regenerate(draft.update_id, 2);
+
+    assert.equal(failedResponse.statusCode, 502, failedResponse.body);
+    resetGenerator();
+
+    const failedId = failedResponse.json<{
+      generationId: string;
+    }>().generationId;
+
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO draft_revisions (
+           update_id,
+           revision_number,
+           text,
+           source_snapshot,
+           created_by,
+           generation_id
+         )
+         VALUES ($1, 3, 'Anything.', '[]'::jsonb, $2, $3)`,
+        [draft.update_id, practitionerUserId, failedId]
+      ),
+      /Only a completed draft generation/
+    );
+
+    // Generation history cannot be rewritten or removed.
+    await assert.rejects(
+      pool.query(
+        `UPDATE draft_generations
+         SET output_text = 'Something else.'
+         WHERE id = $1`,
+        [unusedId]
+      ),
+      /Finished draft generations cannot be changed/
+    );
+
+    await assert.rejects(
+      pool.query(
+        `DELETE FROM draft_generations
+         WHERE id = $1`,
+        [unusedId]
+      ),
+      /cannot be deleted/
+    );
+
+    // The correctly matching revision is accepted.
+    assert.equal(unused.requested_by, practitionerUserId);
+
+    const accepted = await insertRevision(
+      null,
+      practitionerUserId,
+      unusedId
+    );
+
+    assert.equal(accepted.rowCount, 1);
   }
 );
