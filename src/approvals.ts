@@ -1,26 +1,43 @@
+// src/approvals.ts
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
+import { staffRolesFor } from "./authorization.js";
 import {
-  decideEvaluation,
-  evaluatorVersion,
-  type RuleResult,
-} from "./evaluator.js";
-import { sourcesAreCurrent } from "./source-freshness.js";
-import {
-  reviewModel,
-  rubric,
-  rubricVersion,
-} from "./content-reviewer.js";
+  findEvidenceProblem,
+  type EvidenceProblem,
+} from "./approval-evidence.js";
 
 const paramsSchema = z.object({
   evaluationRunId: z.uuid(),
 });
 
+// Wording for each stale-evidence check, from the approval route's
+// point of view. Record<> makes a missing message a type error.
+const approvalProblemMessages: Record<EvidenceProblem, string> = {
+  not_latest_revision:
+    "The evaluation is not for the latest draft revision",
+  evaluation_not_eligible:
+    "Only a completed eligible evaluation can be approved",
+  evaluator_changed:
+    "The evaluator version has changed",
+  policy_changed:
+    "The evaluation policy has changed",
+  missing_content_review:
+    "The evaluation has no content review",
+  content_review_not_current:
+    "The content review is no longer current",
+  stored_results_not_eligible:
+    "The stored evaluation evidence is not eligible",
+  sources_changed:
+    "The source observations have changed since evaluation",
+};
+
 type ApprovalRow = {
   id: string;
   draft_revision_id: string;
   evaluation_run_id: string;
+  approved_by: string | null;
   approved_at: string;
 };
 
@@ -36,6 +53,15 @@ export async function approvalRoutes(app: FastifyInstance) {
         });
       }
 
+      const actor = request.actor;
+
+      if (!actor) {
+        throw new Error(
+          "Protected route reached without an authenticated actor"
+        );
+      }
+
+      const permittedRoles = staffRolesFor("approval:create");
       const client = await pool.connect();
 
       try {
@@ -73,16 +99,36 @@ export async function approvalRoutes(app: FastifyInstance) {
              ON r.id = er.draft_revision_id
            JOIN updates u
              ON u.id = r.update_id
-           WHERE er.id = $1`,
-          [params.data.evaluationRunId]
+           JOIN children c
+             ON c.id = u.child_id
+           JOIN setting_memberships sm
+             ON sm.setting_id = c.setting_id
+           JOIN app_users au
+             ON au.id = sm.user_id
+           WHERE er.id = $1
+             AND sm.user_id = $2
+             AND sm.role = ANY($3::text[])
+             AND au.disabled_at IS NULL
+           FOR SHARE OF c, sm, au`,
+          [
+            params.data.evaluationRunId,
+            actor.userId,
+            permittedRoles,
+          ]
         );
 
         const evaluation = evaluations.rows[0];
 
+        // Access is checked before any evidence is read, and the
+        // access rows stay locked until commit, so the approver's
+        // role cannot be revoked part-way through. A missing run
+        // and another setting's run get the same response.
+        // A practitioner in the right setting is also refused:
+        // approval is a separate capability from drafting.
         if (!evaluation) {
           await client.query("ROLLBACK");
-          return reply.code(404).send({
-            error: "Evaluation run not found",
+          return reply.code(403).send({
+            error: "Not permitted to approve this evaluation",
           });
         }
 
@@ -96,155 +142,24 @@ export async function approvalRoutes(app: FastifyInstance) {
           [evaluation.update_id]
         );
 
-        const latestRevisions = await client.query<{
-          id: string;
-        }>(
-          `SELECT id
-           FROM draft_revisions
-           WHERE update_id = $1
-           ORDER BY revision_number DESC
-           LIMIT 1`,
-          [evaluation.update_id]
-        );
+        const problem = await findEvidenceProblem(client, {
+          updateId: evaluation.update_id,
+          draftRevisionId: evaluation.draft_revision_id,
+          evaluationRunId: evaluation.id,
+          evaluationStatus: evaluation.status,
+          evaluationDecision: evaluation.decision,
+          evaluatorVersion: evaluation.evaluator_version,
+          policyVersion: evaluation.policy_version,
+          contentReviewId: evaluation.content_review_id,
+          sourceSnapshot: evaluation.source_snapshot,
+          childId: evaluation.child_id,
+          observationDate: evaluation.observation_date,
+        });
 
-        if (
-          latestRevisions.rows[0]?.id !==
-          evaluation.draft_revision_id
-        ) {
+        if (problem) {
           await client.query("ROLLBACK");
           return reply.code(409).send({
-            error:
-              "The evaluation is not for the latest draft revision",
-          });
-        }
-
-        if (
-          evaluation.status !== "completed" ||
-          evaluation.decision !== "eligible"
-        ) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error:
-              "Only a completed eligible evaluation can be approved",
-          });
-        }
-
-        if (evaluation.evaluator_version !== evaluatorVersion) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error: "The evaluator version has changed",
-          });
-        }
-
-        const activePolicies = await client.query<{
-          policy_version: number;
-        }>(
-          `SELECT policy_version
-           FROM active_evaluation_policy
-           WHERE id = 1
-           FOR SHARE`
-        );
-
-        if (
-          activePolicies.rows[0]?.policy_version !==
-          evaluation.policy_version
-        ) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error: "The evaluation policy has changed",
-          });
-        }
-
-        if (!evaluation.content_review_id) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error: "The evaluation has no content review",
-          });
-        }
-
-        const reviews = await client.query<{
-          status: string;
-          requested_model: string;
-          returned_model: string | null;
-          rubric_version: string;
-          rubric_text: string;
-        }>(
-          `SELECT
-             status,
-             requested_model,
-             returned_model,
-             rubric_version,
-             rubric_text
-           FROM content_reviews
-           WHERE id = $1
-             AND draft_revision_id = $2`,
-          [
-            evaluation.content_review_id,
-            evaluation.draft_revision_id,
-          ]
-        );
-
-        const review = reviews.rows[0];
-
-        if (
-          !review ||
-          review.status !== "completed" ||
-          review.requested_model !== reviewModel ||
-          review.returned_model !== reviewModel ||
-          review.rubric_version !== rubricVersion ||
-          review.rubric_text !== rubric
-        ) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error: "The content review is no longer current",
-          });
-        }
-
-        const results = await client.query<RuleResult>(
-          `SELECT
-             rule_id AS "ruleId",
-             outcome,
-             reason
-           FROM evaluation_results
-           WHERE evaluation_run_id = $1
-           ORDER BY rule_id`,
-          [evaluation.id]
-        );
-
-        if (decideEvaluation(results.rows) !== "eligible") {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error:
-              "The stored evaluation evidence is not eligible",
-          });
-        }
-
-        const currentSources = await client.query(
-          `SELECT
-             id,
-             child_id,
-             observation_date::text AS observation_date,
-             category,
-             text
-           FROM observations
-           WHERE child_id = $1
-             AND observation_date = $2`,
-          [
-            evaluation.child_id,
-            evaluation.observation_date,
-          ]
-        );
-
-        if (
-          !sourcesAreCurrent(
-            evaluation.source_snapshot,
-            currentSources.rows
-          )
-        ) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error:
-              "The source observations have changed since evaluation",
+            error: approvalProblemMessages[problem],
           });
         }
 
@@ -255,6 +170,7 @@ export async function approvalRoutes(app: FastifyInstance) {
              id,
              draft_revision_id,
              evaluation_run_id,
+             approved_by,
              approved_at
            FROM revision_approvals
            WHERE evaluation_run_id = $1`,
@@ -272,18 +188,21 @@ export async function approvalRoutes(app: FastifyInstance) {
         const inserted = await client.query<ApprovalRow>(
           `INSERT INTO revision_approvals (
              draft_revision_id,
-             evaluation_run_id
+             evaluation_run_id,
+             approved_by
            )
-           VALUES ($1, $2)
+           VALUES ($1, $2, $3)
            ON CONFLICT (evaluation_run_id) DO NOTHING
            RETURNING
              id,
              draft_revision_id,
              evaluation_run_id,
+             approved_by,
              approved_at`,
           [
             evaluation.draft_revision_id,
             evaluation.id,
+            actor.userId,
           ]
         );
 
@@ -296,6 +215,7 @@ export async function approvalRoutes(app: FastifyInstance) {
                id,
                draft_revision_id,
                evaluation_run_id,
+               approved_by,
                approved_at
              FROM revision_approvals
              WHERE evaluation_run_id = $1`,
