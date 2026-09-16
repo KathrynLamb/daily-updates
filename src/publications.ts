@@ -2,18 +2,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
-import {
-  decideEvaluation,
-  evaluatorVersion,
-  type RuleResult,
-} from "./evaluator.js";
-import { sourcesAreCurrent } from "./source-freshness.js";
 import { staffRolesFor } from "./authorization.js";
 import {
-  reviewModel,
-  rubric,
-  rubricVersion,
-} from "./content-reviewer.js";
+  findEvidenceProblem,
+  type EvidenceProblem,
+} from "./approval-evidence.js";
 
 const publishParamsSchema = z.object({
   approvalId: z.uuid(),
@@ -22,6 +15,27 @@ const publishParamsSchema = z.object({
 const childParamsSchema = z.object({
   childId: z.string().trim().min(1),
 });
+
+// Wording for each stale-evidence check, from the publication route's
+// point of view. Record<> makes a missing message a type error.
+const publicationProblemMessages: Record<EvidenceProblem, string> = {
+  not_latest_revision:
+    "The approval is not for the latest draft revision",
+  evaluation_not_eligible:
+    "The approval does not reference an eligible evaluation",
+  evaluator_changed:
+    "The evaluator version has changed",
+  policy_changed:
+    "The evaluation policy has changed",
+  missing_content_review:
+    "The evaluation has no content review",
+  content_review_not_current:
+    "The content review is no longer current",
+  stored_results_not_eligible:
+    "The stored evaluation evidence is not eligible",
+  sources_changed:
+    "The source observations have changed since approval",
+};
 
 type PublicationRow = {
   id: string;
@@ -178,155 +192,24 @@ export async function publicationRoutes(app: FastifyInstance) {
           });
         }
 
-        const latestRevisions = await client.query<{
-          id: string;
-        }>(
-          `SELECT id
-           FROM draft_revisions
-           WHERE update_id = $1
-           ORDER BY revision_number DESC
-           LIMIT 1`,
-          [approval.update_id]
-        );
+        const problem = await findEvidenceProblem(client, {
+          updateId: approval.update_id,
+          draftRevisionId: approval.draft_revision_id,
+          evaluationRunId: approval.evaluation_run_id,
+          evaluationStatus: approval.evaluation_status,
+          evaluationDecision: approval.evaluation_decision,
+          evaluatorVersion: approval.evaluator_version,
+          policyVersion: approval.policy_version,
+          contentReviewId: approval.content_review_id,
+          sourceSnapshot: approval.source_snapshot,
+          childId: approval.child_id,
+          observationDate: approval.observation_date,
+        });
 
-        if (
-          latestRevisions.rows[0]?.id !==
-          approval.draft_revision_id
-        ) {
+        if (problem) {
           await client.query("ROLLBACK");
           return reply.code(409).send({
-            error:
-              "The approval is not for the latest draft revision",
-          });
-        }
-
-        if (
-          approval.evaluation_status !== "completed" ||
-          approval.evaluation_decision !== "eligible"
-        ) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error:
-              "The approval does not reference an eligible evaluation",
-          });
-        }
-
-        if (approval.evaluator_version !== evaluatorVersion) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error: "The evaluator version has changed",
-          });
-        }
-
-        const activePolicies = await client.query<{
-          policy_version: number;
-        }>(
-          `SELECT policy_version
-           FROM active_evaluation_policy
-           WHERE id = 1
-           FOR SHARE`
-        );
-
-        if (
-          activePolicies.rows[0]?.policy_version !==
-          approval.policy_version
-        ) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error: "The evaluation policy has changed",
-          });
-        }
-
-        if (!approval.content_review_id) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error: "The evaluation has no content review",
-          });
-        }
-
-        const reviews = await client.query<{
-          status: string;
-          requested_model: string;
-          returned_model: string | null;
-          rubric_version: string;
-          rubric_text: string;
-        }>(
-          `SELECT
-             status,
-             requested_model,
-             returned_model,
-             rubric_version,
-             rubric_text
-           FROM content_reviews
-           WHERE id = $1
-             AND draft_revision_id = $2`,
-          [
-            approval.content_review_id,
-            approval.draft_revision_id,
-          ]
-        );
-
-        const review = reviews.rows[0];
-
-        if (
-          !review ||
-          review.status !== "completed" ||
-          review.requested_model !== reviewModel ||
-          review.returned_model !== reviewModel ||
-          review.rubric_version !== rubricVersion ||
-          review.rubric_text !== rubric
-        ) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error: "The content review is no longer current",
-          });
-        }
-
-        const results = await client.query<RuleResult>(
-          `SELECT
-             rule_id AS "ruleId",
-             outcome,
-             reason
-           FROM evaluation_results
-           WHERE evaluation_run_id = $1
-           ORDER BY rule_id`,
-          [approval.evaluation_run_id]
-        );
-
-        if (decideEvaluation(results.rows) !== "eligible") {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error:
-              "The stored evaluation evidence is not eligible",
-          });
-        }
-
-        const currentSources = await client.query(
-          `SELECT
-             id,
-             child_id,
-             observation_date::text AS observation_date,
-             category,
-             text
-           FROM observations
-           WHERE child_id = $1
-             AND observation_date = $2`,
-          [
-            approval.child_id,
-            approval.observation_date,
-          ]
-        );
-
-        if (
-          !sourcesAreCurrent(
-            approval.source_snapshot,
-            currentSources.rows
-          )
-        ) {
-          await client.query("ROLLBACK");
-          return reply.code(409).send({
-            error:
-              "The source observations have changed since approval",
+            error: publicationProblemMessages[problem],
           });
         }
 
