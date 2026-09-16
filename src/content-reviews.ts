@@ -1,3 +1,4 @@
+// src/content-reviews.ts
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
@@ -113,14 +114,17 @@ export async function contentReviewRoutes(
            requested_model,
            rubric_version,
            rubric_text,
-           input_snapshot
+           input_snapshot,
+           requested_by
          )
          SELECT
            r.id,
            $4,
            $5,
            $6,
-           $7::jsonb
+           $7::jsonb,
+           -- The member whose access this row just proved.
+           sm.user_id
          FROM draft_revisions r
          JOIN updates u
            ON u.id = r.update_id

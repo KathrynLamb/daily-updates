@@ -10,6 +10,10 @@ import {
 import { sourcesAreCurrent } from "./source-freshness.js";
 import { staffRolesFor } from "./authorization.js";
 import {
+  reviewRuleResults,
+  type StoredContentReview,
+} from "./review-rules.js";
+import {
   reviewModel,
   rubricVersion,
   rubric,
@@ -149,19 +153,9 @@ export async function evaluationRoutes(app: FastifyInstance) {
           : "Source observations changed; refresh the draft sources.",
       });
 
-
-      const reviews = await client.query<{
-        id: string;
-        status: string;
-        verdict: string | null;
-        reason: string | null;
-        returned_model: string | null;
-        coverage_verdict: string | null;
-        coverage_reason: string | null;
-        covered_observation_ids: string[] | null;
-        missing_observation_ids: string[] | null;
-        unknown_observation_ids: string[] | null;
-      }>(
+      const reviews = await client.query<
+        StoredContentReview & { id: string }
+      >(
         `SELECT id, status, verdict, reason, returned_model,
                 coverage_verdict, coverage_reason,
                 covered_observation_ids,
@@ -179,79 +173,9 @@ export async function evaluationRoutes(app: FastifyInstance) {
 
       const review = reviews.rows[0];
 
-      let groundingOutcome: "pass" | "fail" | "error" | "review" =
-        "review";
-      let groundingReason =
-        "No completed matching content review.";
-
-      let coverageOutcome: "pass" | "fail" | "error" | "review" =
-        "review";
-      let coverageReason =
-        "No completed matching content review.";
-
-      if (review?.status === "error") {
-        groundingOutcome = "error";
-        groundingReason = "The content review failed to complete.";
-
-        coverageOutcome = "error";
-        coverageReason = "The content review failed to complete.";
-      } else if (review?.status === "completed") {
-        if (review.returned_model !== reviewModel) {
-          groundingOutcome = "error";
-          groundingReason =
-            "The returned model does not match the required model.";
-
-          coverageOutcome = "error";
-          coverageReason =
-            "The returned model does not match the required model.";
-        } else {
-          groundingOutcome =
-            review.verdict === "supported"
-              ? "pass"
-              : review.verdict === "unsupported"
-                ? "fail"
-                : "review";
-
-          groundingReason =
-            review.reason ?? "Content grounding requires attention.";
-
-          const coverageEvidenceIsComplete =
-            Array.isArray(review.covered_observation_ids) &&
-            Array.isArray(review.missing_observation_ids) &&
-            Array.isArray(review.unknown_observation_ids) &&
-            review.coverage_reason !== null;
-
-          if (!coverageEvidenceIsComplete) {
-            coverageOutcome = "error";
-            coverageReason =
-              "The completed content review has incomplete coverage evidence.";
-          } else if (review.coverage_verdict === "complete") {
-            coverageOutcome = "pass";
-            coverageReason =
-            review.coverage_reason ?? "Coverage review completed.";
-          } else if (review.coverage_verdict === "incomplete") {
-            coverageOutcome = "review";
-            coverageReason =
-            review.coverage_reason ?? "Coverage review completed.";
-          } else {
-            coverageOutcome = "error";
-            coverageReason =
-              "The completed content review has an invalid coverage verdict.";
-          }
-        }
-      }
-
-      evaluation.results.push({
-        ruleId: "content_grounding",
-        outcome: groundingOutcome,
-        reason: groundingReason,
-      });
-
-      evaluation.results.push({
-        ruleId: "content_coverage",
-        outcome: coverageOutcome,
-        reason: coverageReason,
-      });
+      evaluation.results.push(
+        ...reviewRuleResults(review, reviewModel)
+      );
 
       evaluation.decision = decideEvaluation(evaluation.results);
 
@@ -261,9 +185,10 @@ export async function evaluationRoutes(app: FastifyInstance) {
            evaluator_version,
            rules_snapshot,
            policy_version,
-           content_review_id
+           content_review_id,
+           requested_by
          )
-         VALUES ($1, $2, $3::jsonb, $4, $5)
+         VALUES ($1, $2, $3::jsonb, $4, $5, $6)
          RETURNING id`,
         [
           revision.id,
@@ -271,6 +196,7 @@ export async function evaluationRoutes(app: FastifyInstance) {
           JSON.stringify(rules),
           policy.version,
           review?.id ?? null,
+          actor.userId,
         ]
       );
 

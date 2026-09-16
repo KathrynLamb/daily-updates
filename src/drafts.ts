@@ -1,3 +1,4 @@
+// src/drafts.ts
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
@@ -126,19 +127,22 @@ export async function draftRoutes(app: FastifyInstance) {
            update_id,
            revision_number,
            text,
-           source_snapshot
+           source_snapshot,
+           created_by
          )
-         VALUES ($1, 1, $2, $3::jsonb)
+         VALUES ($1, 1, $2, $3::jsonb, $4)
          RETURNING
            id,
            update_id,
            revision_number,
            text,
-           source_snapshot`,
+           source_snapshot,
+           created_by`,
         [
           createdUpdate.id,
           input.text,
           JSON.stringify(sources.rows),
+          actor.userId,
         ]
       );
 
@@ -297,20 +301,23 @@ export async function draftRoutes(app: FastifyInstance) {
              update_id,
              revision_number,
              text,
-             source_snapshot
+             source_snapshot,
+             created_by
            )
-           VALUES ($1, $2, $3, $4::jsonb)
+           VALUES ($1, $2, $3, $4::jsonb, $5)
            RETURNING
              id,
              update_id,
              revision_number,
              text,
-             source_snapshot`,
+             source_snapshot,
+             created_by`,
           [
             params.data.updateId,
             latest.revision_number + 1,
             body.data.text,
             JSON.stringify(sources),
+            actor.userId,
           ]
         );
 

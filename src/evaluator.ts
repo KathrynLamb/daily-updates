@@ -1,3 +1,4 @@
+// src/evaluator.ts
 export type RuleResult = {
   ruleId: string;
   outcome: "pass" | "fail" | "error" | "review";
@@ -14,7 +15,12 @@ type Evaluation = {
   results: RuleResult[];
 };
 
-export const evaluatorVersion = "basic-v4";
+// Bump whenever the meaning of a rule changes. Evaluations recorded
+// under an older version can no longer be approved or published.
+//
+// basic-v5: coverage needs review when the reviewer cites observation
+// IDs that were never supplied.
+export const evaluatorVersion = "basic-v5";
 
 export const initialRules = {
   maxCharacters: 1000,

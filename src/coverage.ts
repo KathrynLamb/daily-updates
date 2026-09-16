@@ -13,8 +13,10 @@ export type Coverage = {
   verdict: CoverageVerdict;
   covered: string[];
   missing: string[];
-  // Ids the model returned that were never supplied. Not a coverage failure,
-  // but worth surfacing: it means the judge invented an id.
+  // Ids the model returned that were never supplied. They do not change
+  // the complete/incomplete verdict, which is a pure set difference, but
+  // they mean the judge invented an id. Evaluation therefore sends any
+  // review with unknown ids to human review (see review-rules.ts).
   unknown: string[];
 };
 
