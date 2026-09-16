@@ -86,7 +86,7 @@ The capability mapping lives in `src/authorization.ts`. PostgreSQL repeats the c
 
 ## Technology
 
-- Node.js 20
+- Node.js 24
 - TypeScript
 - Fastify
 - PostgreSQL
@@ -169,7 +169,7 @@ Critical invariants are enforced in PostgreSQL as well as in the application. Th
 
 ### Requirements
 
-- Node.js 20
+- Node.js 24
 - Docker Desktop with Docker Compose
 
 Install the exact locked dependencies:
