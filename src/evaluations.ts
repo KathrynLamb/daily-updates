@@ -273,14 +273,14 @@ export async function evaluationRoutes(app: FastifyInstance) {
           review?.id ?? null,
         ]
       );
-      
+
       const run = runs.rows[0];
-      
+
       if (!run) {
         throw new Error("Evaluation run was not created");
       }
 
- 
+
       for (const result of evaluation.results) {
         await client.query(
           `INSERT INTO evaluation_results (
@@ -303,7 +303,7 @@ export async function evaluationRoutes(app: FastifyInstance) {
            AND status = 'running'`,
         [run.id, evaluation.decision]
       );
-      
+
       if (completed.rowCount !== 1) {
         throw new Error("Evaluation run was not completed");
       }
