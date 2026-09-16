@@ -278,6 +278,93 @@ curl http://127.0.0.1:3001/health
 
 All business endpoints require a bearer token from the configured identity provider. The verified token identity must match an active row in `app_users`.
 
+## Trying it locally
+
+You can run the whole workflow on your own computer, with made-up users and no identity provider. You need Docker Desktop running.
+
+1. Create a fresh local database with demo data. This deletes any previous local data.
+
+   ```bash
+   npm run local:db
+   ```
+
+2. Start the local server and leave it running.
+
+   ```bash
+   npm run local:server
+   ```
+
+   This uses real Claude, so `ANTHROPIC_API_KEY` must be set in `.env`. A full walkthrough costs a few cents. To try the flow without an API key, run `LOCAL_AI=fake npm run local:server` instead.
+
+3. In a second terminal, run the walkthrough.
+
+   ```bash
+   npm run local:walkthrough
+   ```
+
+   It records observations, has Claude write and review a draft, evaluates it, approves and publishes it, shows what the parent sees, and shows requests from people without access being refused. Run it as often as you like; each run uses the next unused date.
+
+The local server replaces login with an `x-local-user` header naming one of the demo users in `db/seed.sql`: `practitioner`, `approver`, `parent` or `outsider`. It is a separate entry point that production never uses, and it refuses to start unless both the server and the database are on your own computer.
+
+To try individual requests:
+
+```bash
+curl -s -X POST http://127.0.0.1:3001/observations \
+  -H 'x-local-user: practitioner' -H 'content-type: application/json' \
+  -d '{"childId":"demo-ava","observationDate":"2026-12-01","category":"activity","text":"Planted sunflower seeds."}'
+
+curl -s -X POST http://127.0.0.1:3001/drafts/generate \
+  -H 'x-local-user: practitioner' -H 'content-type: application/json' \
+  -d '{"childId":"demo-ava","observationDate":"2026-12-01"}'
+
+curl -s http://127.0.0.1:3001/children/demo-ava/published-updates \
+  -H 'x-local-user: parent'
+```
+
+## Real login
+
+The local server can also require real login tokens from an identity provider, checked by the same code as production. These steps use Auth0, whose free plan is enough; any OpenID Connect provider that issues signed JWT access tokens works the same way.
+
+### Set up Auth0 (once)
+
+1. **Create a tenant** at auth0.com. Its domain looks like `your-tenant.eu.auth0.com`.
+2. **Create an API** (Applications → APIs → Create API). Give it an identifier such as `https://daily-updates-api` and keep the RS256 signing algorithm. This identifier is the token audience.
+3. **Create an application for the terminal login** (Applications → Applications → Create Application → Native). In its settings, under Advanced Settings → Grant Types, make sure **Device Code** is enabled. Copy its Client ID.
+4. **Stop strangers signing up.** Under Authentication → Database → Username-Password-Authentication, turn on **Disable Sign Ups**. Only accounts you create can log in.
+5. **Create the demo accounts** (User Management → Users → Create User), one each for `practitioner`, `approver`, `parent`, and optionally `outsider`. Use made-up addresses you control and strong, unique passwords.
+6. **Add the settings to `.env`:**
+
+   ```bash
+   AUTH_ISSUER=https://your-tenant.eu.auth0.com/
+   AUTH_AUDIENCE=https://daily-updates-api
+   AUTH_JWKS_URL=https://your-tenant.eu.auth0.com/.well-known/jwks.json
+   AUTH_ALGORITHMS=RS256
+   AUTH_CLI_CLIENT_ID=the-client-id-from-step-3
+   ```
+
+   The issuer must match exactly, including the trailing slash.
+
+### Try it
+
+With the local database created (`npm run local:db`):
+
+```bash
+# Once per account: sign in on Auth0's page, then give the account its role.
+npm run auth:login -- practitioner
+npm run auth:link -- practitioner
+# ...repeat for approver, parent and, optionally, outsider.
+
+# Terminal 1: the local server, now requiring real tokens.
+npm run auth:server
+
+# Terminal 2: the walkthrough, using the saved tokens.
+npm run auth:walkthrough
+```
+
+Sign in each account in a private browser window, so Auth0 does not reuse the previous account's session. Tokens are saved in `.tokens/`, which git ignores, and expire after the lifetime set on the Auth0 API (a day by default); run `auth:login` again when they do. `auth:link` only needs repeating after `npm run local:db` resets the database.
+
+In this mode the `x-local-user` header is ignored, and the walkthrough also shows a tampered token being refused. `LOCAL_AI=fake npm run auth:server` tests real login without calling Claude.
+
 ## Main API workflow
 
 | Action | Endpoint | Authorized users |
@@ -312,7 +399,7 @@ This repository demonstrates the core generation, evidence, review, authorizatio
 
 Known limitations include:
 
-- An OIDC/JWKS verifier is implemented, but a specific production identity-provider tenant is not provisioned in this repository.
+- Real login works locally with any OpenID Connect provider (Auth0 steps above), but the API is not yet deployed anywhere.
 - Users, setting memberships, roles, and parent-child links are administered directly in PostgreSQL; there is no user-administration interface.
 - The AI review evaluation set contains 11 cases and each baseline currently represents one run. Draft generation has a live smoke check but no scored evaluation set yet.
 - Generation has no rate limit or per-setting cost control.

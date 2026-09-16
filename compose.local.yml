@@ -1,0 +1,26 @@
+# compose.local.yml
+#
+# A local PostgreSQL database for trying the app by hand.
+# Only reachable from this computer. Reset it with: npm run local:db
+
+services:
+  postgres-local:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: daily_updates_local
+      POSTGRES_USER: daily_updates_local
+      POSTGRES_PASSWORD: daily_updates_local
+    ports:
+      - "127.0.0.1:55433:5432"
+    volumes:
+      - daily-updates-local-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U daily_updates_local -d daily_updates_local
+      interval: 1s
+      timeout: 5s
+      retries: 30
+
+volumes:
+  daily-updates-local-data:

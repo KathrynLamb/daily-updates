@@ -1,9 +1,12 @@
+// src/authentication.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import type { FastifyRequest } from "fastify";
+import { Writable } from "node:stream";
+import Fastify, { type FastifyRequest } from "fastify";
 import {
   createBearerAuthenticator,
   extractBearerToken,
+  registerAuthentication,
   type AuthenticatedActor,
 } from "./authentication.js";
 
@@ -100,3 +103,47 @@ test("rejects a token rejected by the verifier", async () => {
 
   assert.equal(result, null);
 });
+
+test(
+  "an authentication outage returns 503 and logs the cause",
+  async () => {
+    const logLines: string[] = [];
+
+    const app = Fastify({
+      logger: {
+        level: "error",
+        stream: new Writable({
+          write(chunk, _encoding, done) {
+            logLines.push(chunk.toString());
+            done();
+          },
+        }),
+      },
+    });
+
+    registerAuthentication(app, async () => {
+      throw new Error("Key set download timed out");
+    });
+
+    app.get("/protected", async () => ({ ok: true }));
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/protected",
+    });
+
+    await app.close();
+
+    assert.equal(response.statusCode, 503);
+    assert.deepEqual(response.json(), {
+      error: "Authentication unavailable",
+    });
+
+    // The cause must reach the logs, but never the response.
+    const logged = logLines.join("");
+
+    assert.match(logged, /Authentication service failed/);
+    assert.match(logged, /Key set download timed out/);
+    assert.doesNotMatch(response.body, /Key set download/);
+  }
+);
