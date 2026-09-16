@@ -11,6 +11,7 @@
 import "dotenv/config";
 import { z } from "zod";
 import {
+  accountWithIdentity,
   demoAccountFromArguments,
   demoAccounts,
   saveToken,
@@ -149,6 +150,23 @@ while (Date.now() < deadline) {
 
   if (typeof claims.iss !== "string" || typeof claims.sub !== "string") {
     console.error("\nThe access token has no issuer or subject.");
+    process.exit(1);
+  }
+
+  const duplicate = await accountWithIdentity(
+    claims.iss,
+    claims.sub,
+    account
+  );
+
+  if (duplicate) {
+    console.error(
+      `\nThat login is the ${duplicate} account (${claims.sub}), ` +
+        `not ${account}. Nothing was saved.` +
+        "\nThe browser probably reused an earlier sign-in. Close all " +
+        "private windows, open a new one, and run this again, signing in " +
+        `with the ${account} account's email.`
+    );
     process.exit(1);
   }
 

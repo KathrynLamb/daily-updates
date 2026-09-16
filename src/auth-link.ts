@@ -10,6 +10,7 @@
 
 import "dotenv/config";
 import {
+  accountWithIdentity,
   demoAccountFromArguments,
   demoAccounts,
   loadToken,
@@ -26,6 +27,22 @@ if (!token) {
   process.exit(1);
 }
 
+const duplicate = await accountWithIdentity(
+  token.issuer,
+  token.subject,
+  account
+);
+
+if (duplicate) {
+  console.error(
+    `The ${account} and ${duplicate} logins are the same Auth0 user ` +
+      `(${token.subject}), so it was not linked.` +
+      `\nRun npm run auth:login -- ${account} in a new private window, ` +
+      `signing in with the ${account} account's email.`
+  );
+  process.exit(1);
+}
+
 const databaseUrl = process.env.DATABASE_URL;
 
 if (
@@ -37,6 +54,8 @@ if (
   console.error("auth:link only changes a database on this computer.");
   process.exit(1);
 }
+
+class LinkConflict extends Error {}
 
 const { pool } = await import("./db.js");
 
@@ -73,6 +92,37 @@ try {
 
   const access = demoAccounts[account].access;
 
+  // Never silently change what an identity can do. If it already has
+  // different access, the local data is mixed up and should be reset.
+  const existing = await client.query<{ access: string }>(
+    `SELECT 'setting ' || setting_id || ' as ' || role AS access
+     FROM setting_memberships
+     WHERE user_id = $1
+     UNION ALL
+     SELECT 'parent of ' || child_id
+     FROM parent_child_access
+     WHERE user_id = $1`,
+    [userId]
+  );
+
+  const wanted =
+    "child" in access
+      ? `parent of ${access.child}`
+      : `setting ${access.setting} as ${access.role}`;
+
+  const conflicting = existing.rows
+    .map((row) => row.access)
+    .filter((current) => current !== wanted);
+
+  if (conflicting.length > 0) {
+    throw new LinkConflict(
+      `${token.subject} already has other access ` +
+        `(${conflicting.join("; ")}), so it was not linked as ${account}.` +
+        "\nReset the local database with npm run local:db, then link " +
+        "each account again."
+    );
+  }
+
   if ("child" in access) {
     await client.query(
       `INSERT INTO parent_child_access (user_id, child_id)
@@ -84,8 +134,7 @@ try {
     await client.query(
       `INSERT INTO setting_memberships (user_id, setting_id, role)
        VALUES ($1, $2, $3)
-       ON CONFLICT (user_id, setting_id)
-       DO UPDATE SET role = EXCLUDED.role`,
+       ON CONFLICT DO NOTHING`,
       [userId, access.setting, access.role]
     );
   }
@@ -99,12 +148,17 @@ try {
 } catch (error) {
   await client.query("ROLLBACK");
 
-  console.error(
-    "Could not link the account. Has the local database been " +
-      "created with npm run local:db?"
-  );
-  console.error(error);
-  process.exitCode = 1;
+  if (error instanceof LinkConflict) {
+    console.error(error.message);
+    process.exitCode = 1;
+  } else {
+    console.error(
+      "Could not link the account. Has the local database been " +
+        "created with npm run local:db?"
+    );
+    console.error(error);
+    process.exitCode = 1;
+  }
 } finally {
   client.release();
   await pool.end();

@@ -2,7 +2,10 @@
 //
 // Runs the whole workflow against the local server and prints each step:
 // observations, a Claude-written draft, review, evaluation, approval,
-// publication, the parent's view, and a few refused requests.
+// publication, the parent's view, and requests that must be refused.
+//
+// Every refusal is checked, not just printed. If anyone gets access they
+// should not have, the walkthrough stops with a security failure.
 //
 // Start the local server first (npm run local:server), then run:
 //   npm run local:walkthrough
@@ -42,6 +45,30 @@ import {
         process.exit(1);
       }
     }
+  
+    // Each demo account must be a different person. If two logins share an
+    // identity, the role checks below would test the wrong thing.
+    const seen = new Map<string, User>();
+  
+    for (const [user, token] of tokens) {
+      const identity = `${token.issuer} ${token.subject}`;
+      const other = seen.get(identity);
+  
+      if (other) {
+        console.error(
+          `\nThe ${other} and ${user} logins are the same Auth0 user ` +
+            `(${token.subject}).` +
+            "\nThat happens when a browser reuses an earlier login. To fix it:" +
+            "\n  1. npm run local:db   (clears the mixed-up roles)" +
+            `\n  2. npm run auth:login -- ${user}   in a new private window,` +
+            ` signing in as the ${user} account` +
+            "\n  3. npm run auth:link for every account again"
+        );
+        process.exit(1);
+      }
+  
+      seen.set(identity, user);
+    }
   }
   
   function credentials(user: User): Record<string, string> {
@@ -51,9 +78,7 @@ import {
   
     const token = tokens.get(user);
   
-    return token
-      ? { authorization: `Bearer ${token.accessToken}` }
-      : {};
+    return token ? { authorization: `Bearer ${token.accessToken}` } : {};
   }
   
   type Response = {
@@ -61,29 +86,18 @@ import {
     body: any;
   };
   
-  async function call(
-    user: User,
-    method: "GET" | "POST",
+  async function send(
     path: string,
-    body?: unknown
+    init: RequestInit
   ): Promise<Response> {
     let response: globalThis.Response;
   
     try {
-      response = await fetch(`${baseUrl}${path}`, {
-        method,
-        headers: {
-          ...credentials(user),
-          ...(body === undefined
-            ? {}
-            : { "content-type": "application/json" }),
-        },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
+      response = await fetch(`${baseUrl}${path}`, init);
     } catch {
       console.error(
-        `\nCould not reach ${baseUrl}. ` +
-          "Start the local server first: npm run local:server"
+        `\nCould not reach ${baseUrl}. Start the local server first: ` +
+          (realLogin ? "npm run auth:server" : "npm run local:server")
       );
       process.exit(1);
     }
@@ -92,6 +106,22 @@ import {
       status: response.status,
       body: await response.json().catch(() => null),
     };
+  }
+  
+  async function call(
+    user: User,
+    method: "GET" | "POST",
+    path: string,
+    body?: unknown
+  ): Promise<Response> {
+    return send(path, {
+      method,
+      headers: {
+        ...credentials(user),
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
   }
   
   function step(title: string) {
@@ -111,12 +141,28 @@ import {
     }
   
     if (response.status !== status) {
+      console.error(`\n${action} returned ${response.status}, expected ${status}:`);
+      console.error(JSON.stringify(response.body, null, 2));
+      process.exit(1);
+    }
+  }
+  
+  // A request that must not succeed. Anything else is a security failure.
+  function expectRefused(
+    response: Response,
+    status: 401 | 403,
+    description: string
+  ) {
+    if (response.status !== status) {
       console.error(
-        `\n${action} returned ${response.status}, expected ${status}:`
+        `\nSECURITY CHECK FAILED: ${description} returned ` +
+          `${response.status}, expected ${status}.`
       );
       console.error(JSON.stringify(response.body, null, 2));
       process.exit(1);
     }
+  
+    console.log(`  Refused (${status}): ${description}`);
   }
   
   function isoDate(date: Date): string {
@@ -240,13 +286,17 @@ import {
   
   step("5. The practitioner is not allowed to approve");
   
-  const practitionerApproval = await call(
-    "practitioner",
-    "POST",
-    `/evaluation-runs/${evaluationId}/approval`
+  expectRefused(
+    await call("practitioner", "POST", `/evaluation-runs/${evaluationId}/approval`),
+    403,
+    "the practitioner approving"
   );
   
-  console.log(`  ${practitionerApproval.status} ${practitionerApproval.body?.error}`);
+  expectRefused(
+    await call("parent", "POST", `/evaluation-runs/${evaluationId}/approval`),
+    403,
+    "the parent approving"
+  );
   
   if (evaluated.body.decision !== "eligible") {
     console.log(
@@ -269,10 +319,18 @@ import {
   expect(approved, 201, "Approving");
   console.log("  Approved.");
   
+  const approvalId = approved.body.approval.id;
+  
+  expectRefused(
+    await call("practitioner", "POST", `/revision-approvals/${approvalId}/publication`),
+    403,
+    "the practitioner publishing"
+  );
+  
   const published = await call(
     "approver",
     "POST",
-    `/revision-approvals/${approved.body.approval.id}/publication`
+    `/revision-approvals/${approvalId}/publication`
   );
   
   expect(published, 201, "Publishing");
@@ -289,69 +347,83 @@ import {
   expect(parentView, 200, "Reading as the parent");
   
   const latest = parentView.body.updates.find(
-    (update: { observation_date: string }) =>
-      update.observation_date === date
+    (update: { observation_date: string }) => update.observation_date === date
   );
   
-  console.log(`  ${latest?.text}`);
-  console.log(
-    `  Fields the parent receives: ${Object.keys(latest ?? {}).join(", ")}`
-  );
+  if (!latest) {
+    console.error("\nThe parent cannot see the update that was just published.");
+    process.exit(1);
+  }
+  
+  console.log(`  ${latest.text}`);
+  console.log(`  Fields the parent receives: ${Object.keys(latest).join(", ")}`);
   
   step("8. People without access are refused");
   
   if (!realLogin || tokens.has("outsider")) {
-    const outsiderView = await call(
-      "outsider",
-      "GET",
-      `/children/${childId}/published-updates`
+    expectRefused(
+      await call("outsider", "GET", `/children/${childId}/published-updates`),
+      403,
+      "an approver from another setting reading Ava's updates"
     );
   
-    console.log(
-      `  Approver from another setting reads Ava: ${outsiderView.status}`
+    expectRefused(
+      await call("outsider", "POST", `/revisions/${draft.id}/evaluations`),
+      403,
+      "an approver from another setting evaluating Ava's draft"
     );
   } else {
     console.log(
-      "  (Skipped the other-setting check: the outsider account " +
+      "  (Skipped the other-setting checks: the outsider account " +
         "has not logged in.)"
     );
   }
   
-  const parentOther = await call(
-    "parent",
-    "GET",
-    "/children/other-sam/published-updates"
+  expectRefused(
+    await call("parent", "GET", "/children/other-sam/published-updates"),
+    403,
+    "Ava's parent reading another child's updates"
   );
   
-  console.log(`  Ava's parent reads another child: ${parentOther.status}`);
+  expectRefused(
+    await call("parent", "GET", `/children/${childId}/observations`),
+    403,
+    "Ava's parent reading staff observations"
+  );
   
-  const parentDraft = await call("parent", "POST", "/drafts/generate", {
-    childId,
-    observationDate: date,
-  });
-  
-  console.log(`  Parent tries to generate a draft: ${parentDraft.status}`);
+  expectRefused(
+    await call("parent", "POST", "/drafts/generate", {
+      childId,
+      observationDate: date,
+    }),
+    403,
+    "the parent generating a draft"
+  );
   
   if (realLogin) {
-    const forged = await fetch(
-      `${baseUrl}/children/${childId}/published-updates`,
-      {
+    expectRefused(
+      await send(`/children/${childId}/published-updates`, {
         headers: {
           authorization: `Bearer ${tokens.get("parent")?.accessToken}x`,
         },
-      }
+      }),
+      401,
+      "a tampered login token"
     );
   
-    console.log(`  A tampered login token: ${forged.status}`);
-  
-    const localHeader = await fetch(
-      `${baseUrl}/children/${childId}/published-updates`,
-      { headers: { "x-local-user": "approver" } }
-    );
-  
-    console.log(
-      `  The local-only x-local-user header: ${localHeader.status}`
+    expectRefused(
+      await send(`/children/${childId}/published-updates`, {
+        headers: { "x-local-user": "approver" },
+      }),
+      401,
+      "the local-only x-local-user header"
     );
   }
   
-  console.log("\nDone.");
+  expectRefused(
+    await send(`/children/${childId}/published-updates`, {}),
+    401,
+    "a request with no login"
+  );
+  
+  console.log("\nDone. Every access check behaved correctly.");
