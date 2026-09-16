@@ -79,6 +79,7 @@ export async function publicationRoutes(app: FastifyInstance) {
 
         const approvals = await client.query<{
           approval_id: string;
+          approved_by: string | null;
           draft_revision_id: string;
           evaluation_run_id: string;
           evaluation_status: string;
@@ -93,8 +94,9 @@ export async function publicationRoutes(app: FastifyInstance) {
           observation_date: string;
         }>(
           `SELECT
-             ra.id AS approval_id,
-             ra.draft_revision_id,
+            ra.id AS approval_id,
+            ra.approved_by,
+            ra.draft_revision_id,
              ra.evaluation_run_id,
              er.status AS evaluation_status,
              er.decision AS evaluation_decision,
@@ -189,6 +191,20 @@ export async function publicationRoutes(app: FastifyInstance) {
           return reply.code(200).send({
             publication: existingPublication,
             created: false,
+          });
+        }
+
+        // Older approvals without an authenticated actor remain in
+        // the database as historical records. They cannot, however,
+        // authorise a publication that did not already exist.
+        //
+        // This check comes after the idempotent retry so an existing
+        // historical publication can still be returned unchanged.
+        if (!approval.approved_by) {
+          await client.query("ROLLBACK");
+          return reply.code(409).send({
+            error:
+              "The approval does not record an authenticated approver",
           });
         }
 

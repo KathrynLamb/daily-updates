@@ -1224,3 +1224,162 @@ test(
     );
   }
 );
+
+test(
+  "legacy approval without an actor cannot authorise publication",
+  async () => {
+    const prepared =
+      await prepareEligibleEvaluation("2026-10-05");
+
+    const approvalResponse = await approve(
+      prepared.evaluationId
+    );
+
+    assert.equal(
+      approvalResponse.statusCode,
+      201,
+      approvalResponse.body
+    );
+
+    const approvalId = approvalResponse.json<{
+      approval: {
+        id: string;
+        approved_by: string;
+      };
+    }>().approval.id;
+
+    // A fresh database cannot naturally create an unattributed
+    // approval because the current constraint and trigger correctly
+    // reject one.
+    //
+    // To test a real upgrade scenario, temporarily remove those
+    // protections and convert this one row into the shape of an
+    // approval created before authentication existed.
+    //
+    // All schema changes happen in one transaction. If any statement
+    // fails, rollback restores the original triggers and constraint.
+    const client = await pool.connect();
+
+    try {
+      await client.query("BEGIN");
+
+      // The historical table allowed this row before actor tracking
+      // existed. Disable user-defined triggers temporarily so the
+      // immutable-history trigger does not block our test fixture.
+      await client.query(
+        `ALTER TABLE revision_approvals
+         DISABLE TRIGGER USER`
+      );
+
+      // A NOT VALID check still applies to new changes, so it must be
+      // removed while the historical test row is reconstructed.
+      await client.query(
+        `ALTER TABLE revision_approvals
+         DROP CONSTRAINT
+           revision_approvals_approved_by_required`
+      );
+
+      await client.query(
+        `UPDATE revision_approvals
+         SET approved_by = NULL
+         WHERE id = $1`,
+        [approvalId]
+      );
+
+      // Restore the production constraint in its original form.
+      //
+      // NOT VALID allows the deliberately historical NULL row to
+      // remain, while continuing to reject unattributed new rows.
+      await client.query(
+        `ALTER TABLE revision_approvals
+         ADD CONSTRAINT
+           revision_approvals_approved_by_required
+         CHECK (approved_by IS NOT NULL)
+         NOT VALID`
+      );
+
+      await client.query(
+        `ALTER TABLE revision_approvals
+         ENABLE TRIGGER USER`
+      );
+
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+
+    // Confirm that the fixture now genuinely represents an approval
+    // retained from before authenticated actors were recorded.
+    const historicalApprovals = await pool.query<{
+      approved_by: string | null;
+    }>(
+      `SELECT approved_by
+       FROM revision_approvals
+       WHERE id = $1`,
+      [approvalId]
+    );
+
+    assert.equal(
+      historicalApprovals.rows[0]?.approved_by,
+      null
+    );
+
+    // The public API must preserve the historical row but refuse to
+    // treat it as authority for a new publication.
+    const publicationResponse = await publish(approvalId);
+
+    assert.equal(
+      publicationResponse.statusCode,
+      409,
+      publicationResponse.body
+    );
+
+    assert.deepEqual(publicationResponse.json(), {
+      error:
+        "The approval does not record an authenticated approver",
+    });
+
+    // The PostgreSQL trigger must independently reject the same
+    // publication. This protects the system if a future route, script,
+    // or manual query attempts to bypass the API check.
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO published_updates (
+           update_id,
+           draft_revision_id,
+           approval_id,
+           child_id,
+           observation_date,
+           text_snapshot,
+           source_snapshot,
+           published_by
+         )
+         SELECT
+           r.update_id,
+           r.id,
+           ra.id,
+           u.child_id,
+           u.observation_date,
+           r.text,
+           r.source_snapshot,
+           $2::uuid
+         FROM revision_approvals ra
+         JOIN draft_revisions r
+           ON r.id = ra.draft_revision_id
+         JOIN updates u
+           ON u.id = r.update_id
+         WHERE ra.id = $1`,
+        [approvalId, integrationUserId]
+      ),
+      /does not record who approved/
+    );
+
+    assert.equal(
+      await publicationCountFor(prepared.updateId),
+      0
+    );
+  }
+);
