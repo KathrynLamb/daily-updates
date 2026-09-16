@@ -7,7 +7,14 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/*.test.ts",
     "test:integration": "bash scripts/test-integration.sh",
-    "test:all": "npm test && npm run test:integration"
+    "test:all": "npm test && npm run test:integration",
+    "local:db": "bash scripts/local-db.sh",
+    "local:server": "DATABASE_URL=postgresql://daily_updates_local:daily_updates_local@127.0.0.1:55433/daily_updates_local tsx src/local-server.ts",
+    "local:walkthrough": "tsx src/local-walkthrough.ts",
+    "auth:login": "tsx src/auth-login.ts",
+    "auth:link": "DATABASE_URL=postgresql://daily_updates_local:daily_updates_local@127.0.0.1:55433/daily_updates_local tsx src/auth-link.ts",
+    "auth:server": "DATABASE_URL=postgresql://daily_updates_local:daily_updates_local@127.0.0.1:55433/daily_updates_local LOCAL_AUTH=oidc tsx src/local-server.ts",
+    "auth:walkthrough": "WALKTHROUGH_AUTH=tokens tsx src/local-walkthrough.ts"
   },
   "keywords": [],
   "author": "",
