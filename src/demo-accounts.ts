@@ -95,6 +95,35 @@ export async function loadToken(
   return saved;
 }
 
+// Finds another demo account already saved with this identity, even if
+// its token has since expired. Two demo accounts must never be the same
+// person, or the role checks would test the wrong thing.
+export async function accountWithIdentity(
+  issuer: string,
+  subject: string,
+  except: DemoAccount
+): Promise<DemoAccount | null> {
+  for (const account of Object.keys(demoAccounts) as DemoAccount[]) {
+    if (account === except) {
+      continue;
+    }
+
+    try {
+      const saved: SavedToken = JSON.parse(
+        await readFile(tokenPath(account), "utf8")
+      );
+
+      if (saved.issuer === issuer && saved.subject === subject) {
+        return account;
+      }
+    } catch {
+      // No saved login for this account.
+    }
+  }
+
+  return null;
+}
+
 // Reads a token's claims without checking its signature. Only used to
 // show who logged in and to link that identity locally; the API always
 // verifies tokens properly.
