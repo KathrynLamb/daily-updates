@@ -12,6 +12,8 @@ import type { Authenticator } from "../../src/authentication.js";
 
 let reviewerCallCount = 0;
 
+const inventedIdTrigger = "went on a zoo trip";
+
 const fakeReviewer: ContentReviewer = async (input) => {
   reviewerCallCount += 1;
   const draft = input.draft.toLowerCase();
@@ -32,6 +34,12 @@ const fakeReviewer: ContentReviewer = async (input) => {
     .map((observation) => observation.id)
     .filter((id) => !coveredIds.has(id));
 
+  // Drafts mentioning this phrase make the fake reviewer cite an
+  // observation that was never supplied, as a confused model might.
+  const unknown = draft.includes(inventedIdTrigger)
+    ? ["invented-observation-id"]
+    : [];
+
   return {
     verdict: "supported",
     reason: "All claims are supported by the test evidence.",
@@ -42,7 +50,7 @@ const fakeReviewer: ContentReviewer = async (input) => {
           : "incomplete",
       covered,
       missing,
-      unknown: [],
+      unknown,
       reason:
         missing.length === 0
           ? "All observations are represented."
@@ -253,11 +261,13 @@ async function createObservation(
   childId: string,
   observationDate: string,
   category: "activity" | "food" | "sleep" | "general",
-  text: string
+  text: string,
+  userId: string = integrationUserId
 ) {
   const response = await app.inject({
     method: "POST",
     url: "/observations",
+    headers: asUser(userId),
     payload: {
       childId,
       observationDate,
@@ -342,13 +352,15 @@ test(
          update_id,
          revision_number,
          text,
-         source_snapshot
+         source_snapshot,
+         created_by
        )
-       VALUES ($1, 1, $2, '[]'::jsonb)
+       VALUES ($1, 1, $2, '[]'::jsonb, $3)
        RETURNING id`,
       [
         otherUpdateId,
         "A private draft from another setting.",
+        outsideApproverUserId,
       ]
     );
 
@@ -1380,6 +1392,269 @@ test(
     assert.equal(
       await publicationCountFor(prepared.updateId),
       0
+    );
+  }
+);
+
+test(
+  "a review citing unsupplied observations cannot be approved",
+  async () => {
+    const childId = "integration-ava";
+    const observationDate = "2026-10-06";
+
+    await createObservation(
+      childId,
+      observationDate,
+      "activity",
+      "Built a tower."
+    );
+
+    // Every supplied observation is covered, so coverage alone would
+    // be complete. Only the invented ID stands in the way.
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: "/drafts",
+      payload: {
+        childId,
+        observationDate,
+        text: `Built a tower. Also ${inventedIdTrigger}.`,
+      },
+    });
+
+    assert.equal(draftResponse.statusCode, 201, draftResponse.body);
+
+    const draftId = draftResponse.json<{
+      draft: {
+        id: string;
+      };
+    }>().draft.id;
+
+    const reviewResponse = await app.inject({
+      method: "POST",
+      url: `/revisions/${draftId}/content-reviews`,
+    });
+
+    assert.equal(reviewResponse.statusCode, 201, reviewResponse.body);
+
+    const review = reviewResponse.json<{
+      coverage: {
+        verdict: string;
+        unknown: string[];
+      };
+    }>();
+
+    assert.equal(review.coverage.verdict, "complete");
+    assert.deepEqual(review.coverage.unknown, [
+      "invented-observation-id",
+    ]);
+
+    const evaluationResponse = await app.inject({
+      method: "POST",
+      url: `/revisions/${draftId}/evaluations`,
+    });
+
+    assert.equal(
+      evaluationResponse.statusCode,
+      201,
+      evaluationResponse.body
+    );
+
+    const evaluation = evaluationResponse.json<{
+      evaluationId: string;
+      decision: string;
+      results: {
+        ruleId: string;
+        outcome: string;
+        reason: string;
+      }[];
+    }>();
+
+    assert.equal(evaluation.decision, "needs_review");
+
+    const coverageResult = evaluation.results.find(
+      (result) => result.ruleId === "content_coverage"
+    );
+
+    assert.equal(coverageResult?.outcome, "review");
+    assert.match(
+      coverageResult?.reason ?? "",
+      /invented-observation-id/
+    );
+
+    const approvalResponse = await approve(evaluation.evaluationId);
+
+    assert.equal(
+      approvalResponse.statusCode,
+      409,
+      approvalResponse.body
+    );
+    assert.deepEqual(approvalResponse.json(), {
+      error:
+        "Only a completed eligible evaluation can be approved",
+    });
+  }
+);
+
+test(
+  "evidence records who created it",
+  async () => {
+    const childId = "integration-ava";
+    const observationDate = "2026-10-07";
+    const practitioner = asUser(practitionerUserId);
+
+    await createObservation(
+      childId,
+      observationDate,
+      "activity",
+      "Planted seeds.",
+      practitionerUserId
+    );
+
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: "/drafts",
+      headers: practitioner,
+      payload: {
+        childId,
+        observationDate,
+        text: "Planted seeds.",
+      },
+    });
+
+    assert.equal(draftResponse.statusCode, 201, draftResponse.body);
+
+    const draft = draftResponse.json<{
+      draft: {
+        id: string;
+        update_id: string;
+        created_by: string;
+      };
+    }>().draft;
+
+    assert.equal(draft.created_by, practitionerUserId);
+
+    // A second revision, saved by a different person.
+    const revisionResponse = await app.inject({
+      method: "POST",
+      url: `/updates/${draft.update_id}/revisions`,
+      payload: {
+        expectedRevision: 1,
+        text: "Planted seeds in the garden.",
+        refreshSources: false,
+      },
+    });
+
+    assert.equal(
+      revisionResponse.statusCode,
+      201,
+      revisionResponse.body
+    );
+
+    const revision = revisionResponse.json<{
+      draft: {
+        id: string;
+        created_by: string;
+      };
+    }>().draft;
+
+    assert.equal(revision.created_by, integrationUserId);
+
+    const reviewResponse = await app.inject({
+      method: "POST",
+      url: `/revisions/${revision.id}/content-reviews`,
+      headers: practitioner,
+    });
+
+    assert.equal(reviewResponse.statusCode, 201, reviewResponse.body);
+
+    const evaluationResponse = await app.inject({
+      method: "POST",
+      url: `/revisions/${revision.id}/evaluations`,
+      headers: practitioner,
+    });
+
+    assert.equal(
+      evaluationResponse.statusCode,
+      201,
+      evaluationResponse.body
+    );
+
+    const actors = await pool.query<{
+      observation_by: string;
+      first_revision_by: string;
+      second_revision_by: string;
+      review_by: string;
+      evaluation_by: string;
+    }>(
+      `SELECT
+         (SELECT recorded_by
+          FROM observations
+          WHERE child_id = $1
+            AND observation_date = $2) AS observation_by,
+         (SELECT created_by
+          FROM draft_revisions
+          WHERE id = $3) AS first_revision_by,
+         (SELECT created_by
+          FROM draft_revisions
+          WHERE id = $4) AS second_revision_by,
+         (SELECT requested_by
+          FROM content_reviews
+          WHERE draft_revision_id = $4) AS review_by,
+         (SELECT requested_by
+          FROM evaluation_runs
+          WHERE draft_revision_id = $4) AS evaluation_by`,
+      [childId, observationDate, draft.id, revision.id]
+    );
+
+    assert.deepEqual(actors.rows[0], {
+      observation_by: practitionerUserId,
+      first_revision_by: practitionerUserId,
+      second_revision_by: integrationUserId,
+      review_by: practitionerUserId,
+      evaluation_by: practitionerUserId,
+    });
+
+    // Finishing a review or evaluation cannot rewrite who asked for it.
+    for (const table of ["content_reviews", "evaluation_runs"]) {
+      await assert.rejects(
+        pool.query(
+          `UPDATE ${table}
+           SET requested_by = $1
+           WHERE draft_revision_id = $2`,
+          [integrationUserId, revision.id]
+        ),
+        /cannot be changed/,
+        table
+      );
+    }
+
+    // New evidence without an author is refused by the database.
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO observations (
+           child_id,
+           observation_date,
+           category,
+           text
+         )
+         VALUES ($1, $2, 'general', 'Unattributed.')`,
+        [childId, observationDate]
+      ),
+      /observations_recorded_by_required/
+    );
+
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO draft_revisions (
+           update_id,
+           revision_number,
+           text,
+           source_snapshot
+         )
+         VALUES ($1, 3, 'Unattributed.', '[]'::jsonb)`,
+        [draft.update_id]
+      ),
+      /draft_revisions_created_by_required/
     );
   }
 );

@@ -147,6 +147,10 @@ Application code compares the returned IDs with the supplied observation IDs and
 - unknown IDs returned by the model;
 - a final `complete` or `incomplete` coverage verdict.
 
+Evaluation passes coverage only when the verdict is `complete` **and** the model returned no unknown IDs. A review that cites observations it was never given is treated as unreliable and sent to human review, even if every supplied observation appears. The review-based rules live in `src/review-rules.ts` as pure functions with their own unit tests.
+
+Whenever the meaning of a rule changes, the evaluator version is bumped. Evaluations recorded under an older version can no longer be approved or published.
+
 The wire JSON Schema is generated directly from Zod and passed to the Anthropic API without the SDK schema helper. During development, the helper was found to remove enum constraints from the transmitted schema.
 
 The response is also validated locally with Zod before it can be stored.
@@ -159,6 +163,7 @@ The migrations in `db/migrations` build the database in order and include protec
 - immutable evaluation-policy versions;
 - immutable completed content reviews;
 - immutable completed evaluation runs and results;
+- who recorded each observation, saved each draft revision, and requested each AI review and evaluation;
 - actor-attributed approvals;
 - actor-attributed publications;
 - tenant memberships and parent-child access;
@@ -188,10 +193,10 @@ npm run test:all
 
 `test:all` runs:
 
-- 64 deterministic unit and route tests;
+- 76 deterministic unit and route tests;
 - a disposable PostgreSQL container;
 - every migration against a clean database;
-- 6 end-to-end database workflow tests.
+- 8 end-to-end database workflow tests.
 
 The integration tests cover:
 
@@ -203,7 +208,9 @@ The integration tests cover:
 - publication refusal when evidence changes after approval;
 - role enforcement through both the API and PostgreSQL;
 - parent reads limited to explicitly linked children;
-- refusal to publish from an unattributed historical approval.
+- refusal to publish from an unattributed historical approval;
+- evaluation that sends a review citing unsupplied observation IDs to human review;
+- attribution of every observation, revision, review, and evaluation to the person who created it.
 
 Tests inject a deterministic content reviewer and test authenticator. They do not call the live Anthropic API or a live identity provider.
 
@@ -274,10 +281,8 @@ Known limitations include:
 
 - An OIDC/JWKS verifier is implemented, but a specific production identity-provider tenant is not provisioned in this repository.
 - Users, setting memberships, roles, and parent-child links are administered directly in PostgreSQL; there is no user-administration interface.
-- Unknown observation IDs returned by the reviewer are recorded but do not currently block approval. They should eventually route the draft to human review.
 - The AI evaluation set contains 11 cases and each baseline currently represents one run.
 - There is no frontend client in this repository.
 - Rate limiting, production observability, backups, operational alerting, and secrets management remain deployment responsibilities.
-- Actor attribution currently covers approvals and publications rather than every evidence-creation action.
 
 These limitations are documented explicitly so future work can strengthen the system without obscuring what the current implementation guarantees.

@@ -1,3 +1,4 @@
+// src/observations.ts
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { pool } from "./db.js";
@@ -28,6 +29,7 @@ type ObservationRow = {
   observation_date: string;
   category: string;
   text: string;
+  recorded_by: string;
 };
 
 export async function observationRoutes(
@@ -82,13 +84,16 @@ export async function observationRoutes(
          child_id,
          observation_date,
          category,
-         text
+         text,
+         recorded_by
        )
        SELECT
          c.id,
          $3::date,
          $4,
-         $5
+         $5,
+         -- The member whose access this row just proved.
+         sm.user_id
        FROM children c
        JOIN setting_memberships sm
          ON sm.setting_id = c.setting_id
@@ -103,7 +108,8 @@ export async function observationRoutes(
          child_id,
          observation_date::text AS observation_date,
          category,
-         text`,
+         text,
+         recorded_by`,
       [
         actor.userId,
         observation.childId,
