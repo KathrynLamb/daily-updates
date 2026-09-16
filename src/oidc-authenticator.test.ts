@@ -337,3 +337,123 @@ test(
     );
   }
 );
+
+// Anyone can send these tokens without holding a signing key, so
+// they must be treated as bad credentials (401), never as an
+// authentication outage (503).
+
+function unsignedToken(header: object): string {
+  const encode = (value: object) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+
+  return [
+    encode(header),
+    encode({
+      iss: config.issuer,
+      aud: config.audience,
+      sub: "external-user-123",
+    }),
+    Buffer.from("not-a-signature").toString("base64url"),
+  ].join(".");
+}
+
+test(
+  "rejects a token with an unrecognised critical header",
+  async () => {
+    const token = unsignedToken({
+      alg: "RS256",
+      kid: "trusted-test-key",
+      crit: ["unrecognised-extension"],
+      "unrecognised-extension": true,
+    });
+
+    const authenticator = createOidcAuthenticator(
+      config,
+      {
+        getKey: trustedKeySet,
+        findActiveUser: async () => ({
+          id: "internal-user-456",
+        }),
+      }
+    );
+
+    const actor = await authenticator(
+      requestWithToken(token)
+    );
+
+    assert.equal(actor, null);
+  }
+);
+
+test(
+  "rejects a token without a key ID when several keys are published",
+  async () => {
+    // Identity providers publish more than one key while rotating
+    // them, so a missing key ID cannot select a single key.
+    const rotatedKeys = await generateKeyPair("RS256");
+
+    const keySetDuringRotation = createLocalJWKSet({
+      keys: [
+        trustedPublicJwk,
+        {
+          ...(await exportJWK(rotatedKeys.publicKey)),
+          kid: "rotated-test-key",
+          alg: "RS256",
+          use: "sig",
+        },
+      ],
+    });
+
+    const token = await new SignJWT({})
+      .setProtectedHeader({
+        alg: "RS256",
+      })
+      .setIssuer(config.issuer)
+      .setAudience(config.audience)
+      .setSubject("external-user-123")
+      .setIssuedAt()
+      .setExpirationTime("5m")
+      .sign(trustedKeys.privateKey);
+
+    const authenticator = createOidcAuthenticator(
+      config,
+      {
+        getKey: keySetDuringRotation,
+        findActiveUser: async () => ({
+          id: "internal-user-456",
+        }),
+      }
+    );
+
+    const actor = await authenticator(
+      requestWithToken(token)
+    );
+
+    assert.equal(actor, null);
+  }
+);
+
+test(
+  "propagates key set download failures as service failures",
+  async () => {
+    const token = await createToken();
+
+    const authenticator = createOidcAuthenticator(
+      config,
+      {
+        getKey: async () => {
+          throw new Error("Key set unavailable");
+        },
+        findActiveUser: async () => ({
+          id: "internal-user-456",
+        }),
+      }
+    );
+
+    await assert.rejects(
+      () =>
+        authenticator(requestWithToken(token)),
+      /Key set unavailable/
+    );
+  }
+);

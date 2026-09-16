@@ -1,3 +1,4 @@
+<!-- README.md -->
 # Daily Updates
 
 [![CI](https://github.com/KathrynLamb/daily-updates/actions/workflows/ci.yml/badge.svg)](https://github.com/KathrynLamb/daily-updates/actions/workflows/ci.yml)
@@ -187,7 +188,7 @@ npm run test:all
 
 `test:all` runs:
 
-- 61 deterministic unit and route tests;
+- 64 deterministic unit and route tests;
 - a disposable PostgreSQL container;
 - every migration against a clean database;
 - 6 end-to-end database workflow tests.
