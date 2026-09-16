@@ -16,11 +16,28 @@ import {
   generateKeyPair,
   SignJWT,
 } from "jose";
-import {
+import type {
+  OidcConfig,
+} from "./oidc-authenticator.js";
+
+// Importing the production authenticator also loads the database
+// module. Unit tests inject their own user lookup and never connect
+// to PostgreSQL, but the database module still requires a connection
+// string while it is being initialized.
+//
+// Supply a non-secret placeholder before the runtime import so these
+// tests behave the same on a clean CI machine and on a developer
+// computer with a local .env file.
+process.env.DATABASE_URL ??=
+  "postgresql://test:test@127.0.0.1:5432/test";
+
+// A dynamic import runs only after the test environment above has
+// been established. The type-only import is removed by TypeScript
+// and therefore does not initialize the database module.
+const {
   createOidcAuthenticator,
   oidcConfigFromEnvironment,
-  type OidcConfig,
-} from "./oidc-authenticator.js";
+} = await import("./oidc-authenticator.js");
 
 // This represents the identity provider configuration trusted by the
 // API during these tests.
