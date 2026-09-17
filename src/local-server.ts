@@ -165,8 +165,12 @@ if (realLogin) {
   authenticator = createOidcAuthenticator(config);
 }
 
+// The Expo web app's development address. Override with APP_ORIGIN.
+const appOrigin = process.env.APP_ORIGIN ?? "http://localhost:8081";
+
 const app = buildApp({
   authenticator,
+  corsOrigins: [appOrigin],
   ...(fakeAi
     ? {
         generator: fakeGenerator,
@@ -190,6 +194,7 @@ try {
 
   console.log(
     `\nLocal server on http://${host}:${port}` +
+      `\nWeb app allowed from: ${appOrigin}` +
       `\nAI: ${fakeAi ? "fake (no API calls)" : "real Claude"}` +
       (realLogin
         ? `\nLogin: real tokens from ${process.env.AUTH_ISSUER}` +

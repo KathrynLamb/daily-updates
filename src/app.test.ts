@@ -1,3 +1,4 @@
+// src/app.test.ts
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Authenticator } from "./authentication.js";
@@ -90,6 +91,131 @@ test(
     assert.equal(
       response.json().error,
       "Invalid observation"
+    );
+  }
+);
+
+const webOrigin = "https://app.example.test";
+
+test(
+  "a listed web app origin passes the browser preflight without a token",
+  async (t) => {
+    const app = buildApp({
+      logger: false,
+      corsOrigins: [webOrigin],
+    });
+
+    t.after(async () => {
+      await app.close();
+    });
+
+    const response = await app.inject({
+      method: "OPTIONS",
+      url: "/me",
+      headers: {
+        origin: webOrigin,
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "authorization",
+      },
+    });
+
+    assert.equal(response.statusCode, 204);
+    assert.equal(
+      response.headers["access-control-allow-origin"],
+      webOrigin
+    );
+    assert.match(
+      String(response.headers["access-control-allow-headers"]),
+      /authorization/i
+    );
+    assert.equal(
+      response.headers["access-control-allow-credentials"],
+      undefined
+    );
+  }
+);
+
+test(
+  "the preflight does not let a browser skip authentication",
+  async (t) => {
+    const app = buildApp({
+      logger: false,
+      corsOrigins: [webOrigin],
+    });
+
+    t.after(async () => {
+      await app.close();
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/me",
+      headers: {
+        origin: webOrigin,
+      },
+    });
+
+    assert.equal(response.statusCode, 401);
+    assert.equal(
+      response.headers["access-control-allow-origin"],
+      webOrigin
+    );
+  }
+);
+
+test(
+  "an unlisted origin is not granted browser access",
+  async (t) => {
+    const app = buildApp({
+      logger: false,
+      corsOrigins: [webOrigin],
+    });
+
+    t.after(async () => {
+      await app.close();
+    });
+
+    const response = await app.inject({
+      method: "OPTIONS",
+      url: "/me",
+      headers: {
+        origin: "https://evil.example.test",
+        "access-control-request-method": "GET",
+        "access-control-request-headers": "authorization",
+      },
+    });
+
+    assert.equal(
+      response.headers["access-control-allow-origin"],
+      undefined
+    );
+  }
+);
+
+test(
+  "no origin is granted browser access unless configured",
+  async (t) => {
+    const app = buildApp({
+      logger: false,
+      authenticator: fakeAuthenticator,
+    });
+
+    t.after(async () => {
+      await app.close();
+    });
+
+    const response = await app.inject({
+      method: "GET",
+      url: "/health",
+      headers: {
+        origin: webOrigin,
+      },
+    });
+
+    assert.equal(response.statusCode, 200);
+    assert.equal(
+      response.headers["access-control-allow-origin"],
+      undefined
     );
   }
 );

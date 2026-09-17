@@ -1,9 +1,17 @@
 // src/auth-link.ts
 //
-// Gives a logged-in demo account its role in the local database, using
-// the identity from its saved login token. Safe to run more than once.
+// Gives a demo account its role in the local database. Safe to run more
+// than once, and it never changes access an identity already has.
 //
-// Run: npm run auth:link -- practitioner
+// Two ways to name the identity:
+//
+//   npm run auth:link -- practitioner
+//     uses the saved login from npm run auth:login
+//
+//   npm run auth:link -- practitioner 'auth0|abc123'
+//     uses an Auth0 user ID, as shown in the Auth0 dashboard under
+//     User Management > Users, or on the app's "not set up" screen.
+//     The issuer is AUTH_ISSUER from .env.
 //
 // Only for the local database. Real deployments will need a proper way
 // to invite and manage users.
@@ -17,30 +25,48 @@ import {
 } from "./demo-accounts.js";
 
 const account = demoAccountFromArguments();
-const token = await loadToken(account);
+const givenSubject = process.argv[3]?.trim();
 
-if (!token) {
-  console.error(
-    `No current login for ${account}. ` +
-      `Run: npm run auth:login -- ${account}`
+let identity: { issuer: string; subject: string };
+
+if (givenSubject) {
+  const issuer = process.env.AUTH_ISSUER;
+
+  if (!issuer) {
+    console.error("Set AUTH_ISSUER in .env to link by Auth0 user ID.");
+    process.exit(1);
+  }
+
+  identity = { issuer, subject: givenSubject };
+} else {
+  const token = await loadToken(account);
+
+  if (!token) {
+    console.error(
+      `No current login for ${account}. Either run ` +
+        `npm run auth:login -- ${account}, or pass the Auth0 user ID: ` +
+        `npm run auth:link -- ${account} 'auth0|...'`
+    );
+    process.exit(1);
+  }
+
+  identity = { issuer: token.issuer, subject: token.subject };
+
+  const duplicate = await accountWithIdentity(
+    token.issuer,
+    token.subject,
+    account
   );
-  process.exit(1);
-}
 
-const duplicate = await accountWithIdentity(
-  token.issuer,
-  token.subject,
-  account
-);
-
-if (duplicate) {
-  console.error(
-    `The ${account} and ${duplicate} logins are the same Auth0 user ` +
-      `(${token.subject}), so it was not linked.` +
-      `\nRun npm run auth:login -- ${account} in a new private window, ` +
-      `signing in with the ${account} account's email.`
-  );
-  process.exit(1);
+  if (duplicate) {
+    console.error(
+      `The ${account} and ${duplicate} logins are the same Auth0 user ` +
+        `(${token.subject}), so it was not linked.` +
+        `\nRun npm run auth:login -- ${account} in a new private window, ` +
+        `signing in with the ${account} account's email.`
+    );
+    process.exit(1);
+  }
 }
 
 const databaseUrl = process.env.DATABASE_URL;
@@ -81,7 +107,7 @@ try {
      ON CONFLICT (identity_issuer, identity_subject)
      DO UPDATE SET identity_subject = EXCLUDED.identity_subject
      RETURNING id`,
-    [token.issuer, token.subject]
+    [identity.issuer, identity.subject]
   );
 
   const userId = users.rows[0]?.id;
@@ -116,7 +142,7 @@ try {
 
   if (conflicting.length > 0) {
     throw new LinkConflict(
-      `${token.subject} already has other access ` +
+      `${identity.subject} already has other access ` +
         `(${conflicting.join("; ")}), so it was not linked as ${account}.` +
         "\nReset the local database with npm run local:db, then link " +
         "each account again."
@@ -142,7 +168,7 @@ try {
   await client.query("COMMIT");
 
   console.log(
-    `Linked ${token.subject} as the demo ${account} ` +
+    `Linked ${identity.subject} as the demo ${account} ` +
       `(${demoAccounts[account].description}).`
   );
 } catch (error) {

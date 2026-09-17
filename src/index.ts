@@ -27,8 +27,16 @@ const authenticator =
 
 // Tests can still build the application with a controlled fake
 // authenticator. This production entry point uses real OIDC.
+// Browser origins allowed to call the API, comma-separated,
+// for example: CORS_ORIGINS=https://app.example.com
+const corsOrigins = (process.env.CORS_ORIGINS ?? "")
+  .split(",")
+  .map((origin) => origin.trim())
+  .filter((origin) => origin.length > 0);
+
 const app = buildApp({
   authenticator,
+  corsOrigins,
 });
 
 async function start() {
