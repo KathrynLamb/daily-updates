@@ -14,7 +14,9 @@
     "auth:login": "tsx src/auth-login.ts",
     "auth:link": "DATABASE_URL=postgresql://daily_updates_local:daily_updates_local@127.0.0.1:55433/daily_updates_local tsx src/auth-link.ts",
     "auth:server": "DATABASE_URL=postgresql://daily_updates_local:daily_updates_local@127.0.0.1:55433/daily_updates_local LOCAL_AUTH=oidc tsx src/local-server.ts",
-    "auth:walkthrough": "WALKTHROUGH_AUTH=tokens tsx src/local-walkthrough.ts"
+    "auth:walkthrough": "WALKTHROUGH_AUTH=tokens tsx src/local-walkthrough.ts",
+    "app:install": "npm --prefix app install",
+    "app:web": "npm --prefix app run web"
   },
   "keywords": [],
   "author": "",
@@ -29,6 +31,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.125.0",
+    "@fastify/cors": "^11.3.0",
     "dotenv": "^17.4.2",
     "fastify": "^5.12.3",
     "jose": "^6.2.12",

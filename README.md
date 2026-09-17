@@ -40,6 +40,7 @@ This project treats AI review as one piece of evidence inside a controlled workf
 - Every draft generation attempt is recorded with who requested it, the model, the prompt, and exactly what the model was sent, and cannot be changed once finished.
 - A revision marked as generated must contain exactly the text the model returned, from exactly the observations it was given. PostgreSQL enforces this.
 - Failed or incomplete generations never become drafts.
+- Each draft version gets one AI review. Because a model can answer differently each time, repeating the review until it happened to pass would defeat the check; to check again, the draft must change. PostgreSQL enforces this, including for simultaneous requests. A review that failed with an error can be retried.
 
 ### Approval and publication
 
@@ -180,6 +181,8 @@ The wire JSON Schema is generated directly from Zod and passed to the Anthropic 
 
 The response is also validated locally with Zod before it can be stored.
 
+Only one review is kept per draft version and reviewer configuration (migration 020). Evaluation rules are deterministic once a review exists, so this makes the whole check repeatable: asking again gives the same answer, and changing the draft creates a new version that is checked afresh.
+
 ## Database history and immutability
 
 The migrations in `db/migrations` build the database in order and include protections for:
@@ -219,10 +222,10 @@ npm run test:all
 
 `test:all` runs:
 
-- 90 deterministic unit and route tests;
+- 95 deterministic unit and route tests;
 - a disposable PostgreSQL container;
 - every migration against a clean database;
-- 13 end-to-end database workflow tests.
+- 18 end-to-end database workflow tests.
 
 The integration tests cover:
 
@@ -241,7 +244,13 @@ The integration tests cover:
 - failed generations recorded without creating a draft;
 - generation refused before the model is called for other settings, parents, existing updates, and dates without observations;
 - regeneration that uses current observations and never overwrites an edit saved while the model was writing;
-- database refusal of generated revisions that do not match their generation.
+- database refusal of generated revisions that do not match their generation;
+- `GET /me` describing each user's settings, roles, capabilities and children;
+- the staff view of each day's draft status, refused to parents and other settings;
+- the approval queue listing only eligible, unpublished drafts, with their notes, for approvers in the right setting;
+- one AI review per draft version, including simultaneous requests and retry after a failed review.
+
+Unit tests also check that only listed browser origins may call the API, and that a browser's preflight request does not bypass authentication.
 
 Tests inject a deterministic draft generator, content reviewer, and test authenticator. They do not call the live Anthropic API or a live identity provider.
 
@@ -321,7 +330,48 @@ curl -s http://127.0.0.1:3001/children/demo-ava/published-updates \
   -H 'x-local-user: parent'
 ```
 
-## Real login
+## The app
+
+The `app` folder is an Expo app (SDK 57) that runs in a web browser now and can be built for phones later. People log in with Auth0's own page and see what their role allows:
+
+- **Practitioners** add the day's notes for a child, have Claude write the update, edit or rewrite it, and run the checks. They see each check in plain language and cannot approve.
+- **Approvers** also get a queue of checked updates, each shown next to the notes it was written from, and approve and send them as two separate steps.
+- **Parents** see only their own child's sent updates.
+
+Anything Claude wrote is shown on a pale blue panel, so it is never mistaken for staff writing. A draft that fails its checks cannot simply be checked again; it has to be edited or rewritten first.
+
+### Set up the app in Auth0 (once)
+
+1. Create an application (Applications → Create Application), name it **Daily Updates Web**, and choose **Single-Page App**.
+2. In its Settings, set **Allowed Callback URLs**, **Allowed Logout URLs** and **Allowed Web Origins** to `http://localhost:8081`, and save.
+3. On its API Access tab, authorise **Daily Updates API** for user access.
+4. On its Connections tab, keep **Username-Password-Authentication** on and turn **google-oauth2** off.
+5. Copy `app/.env.example` to `app/.env` and fill it in. Every value in it is public.
+
+### Run it
+
+```bash
+npm run local:db          # once, or to start again from empty
+npm run auth:server       # terminal 1: the API, requiring real logins
+npm run app:install       # once
+npm run app:web           # terminal 2: the app, at http://localhost:8081
+```
+
+The first time an account logs in, the app shows its Auth0 user ID and explains that it is not set up yet. Give it a demo role with that ID, then press **Check again**:
+
+```bash
+npm run auth:link -- practitioner 'auth0|…'
+npm run auth:link -- approver 'auth0|…'
+npm run auth:link -- parent 'auth0|…'
+```
+
+The same IDs are listed in the Auth0 dashboard under User Management → Users. To switch accounts, log out in the app; that also ends the Auth0 session, so the next login asks for an email and password.
+
+`LOCAL_AI=fake npm run auth:server` runs the same thing without calling Claude.
+
+## Real login from the terminal
+
+The app is the easiest way to use real login. The terminal commands below are an alternative for scripted checks.
 
 The local server can also require real login tokens from an identity provider, checked by the same code as production. These steps use Auth0, whose free plan is enough; any OpenID Connect provider that issues signed JWT access tokens works the same way.
 
@@ -369,6 +419,9 @@ In this mode the `x-local-user` header is ignored, and the walkthrough also show
 
 | Action | Endpoint | Authorized users |
 | --- | --- | --- |
+| Who am I and what can I do | `GET /me` | Anyone logged in |
+| A child's drafts and their status | `GET /children/:childId/updates` | Staff in the child’s setting |
+| Drafts waiting for approval | `GET /approval-queue` | Approvers and admins, for their settings |
 | Create observation | `POST /observations` | Staff in the child’s setting |
 | Read observations | `GET /children/:childId/observations` | Staff in the child’s setting |
 | Generate initial draft | `POST /drafts/generate` | Staff in the child’s setting |
@@ -390,6 +443,7 @@ GitHub Actions runs the following for every push and pull request:
 3. Unit and route tests.
 4. Clean database migrations.
 5. Database integration tests.
+6. Dependency installation and type checking for the app.
 
 The CI badge at the top of this file links to the latest workflow results.
 
@@ -403,7 +457,8 @@ Known limitations include:
 - Users, setting memberships, roles, and parent-child links are administered directly in PostgreSQL; there is no user-administration interface.
 - The AI review evaluation set contains 11 cases and each baseline currently represents one run. Draft generation has a live smoke check but no scored evaluation set yet.
 - Generation has no rate limit or per-setting cost control.
-- There is no frontend client in this repository.
+- The app has been built and tested in a web browser. It has not yet been tried on a phone or tablet.
+- The access token is kept in memory only, so reloading the app means logging in again (usually one click, because Auth0 remembers the session).
 - Rate limiting, production observability, backups, operational alerting, and secrets management remain deployment responsibilities.
 
 These limitations are documented explicitly so future work can strengthen the system without obscuring what the current implementation guarantees.

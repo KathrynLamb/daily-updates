@@ -16,8 +16,16 @@ let reviewerCallCount = 0;
 
 const inventedIdTrigger = "went on a zoo trip";
 
+// Set to make the fake reviewer fail, as a provider outage would.
+let reviewerFailure: Error | null = null;
+
 const fakeReviewer: ContentReviewer = async (input) => {
   reviewerCallCount += 1;
+
+  if (reviewerFailure) {
+    throw reviewerFailure;
+  }
+
   const draft = input.draft.toLowerCase();
 
   const covered = input.observations
@@ -2351,5 +2359,481 @@ test(
     );
 
     assert.equal(accepted.rowCount, 1);
+  }
+);
+test(
+  "GET /me describes each user's access",
+  async () => {
+    const me = async (userId: string) => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/me",
+        headers: asUser(userId),
+      });
+
+      assert.equal(response.statusCode, 200, response.body);
+      return response.json();
+    };
+
+    const approver = await me(integrationUserId);
+
+    assert.equal(approver.user.id, integrationUserId);
+    assert.deepEqual(approver.parentOf, []);
+    assert.equal(approver.staff.length, 1);
+    assert.equal(approver.staff[0].settingId, "integration-setting");
+    assert.equal(approver.staff[0].role, "approver");
+    assert.ok(approver.staff[0].capabilities.includes("approval:create"));
+    assert.deepEqual(approver.staff[0].children, [
+      { id: "integration-ava", firstName: "Ava" },
+    ]);
+
+    const practitioner = await me(practitionerUserId);
+
+    assert.equal(practitioner.staff[0].role, "practitioner");
+    assert.ok(
+      practitioner.staff[0].capabilities.includes("draft:create")
+    );
+    assert.ok(
+      !practitioner.staff[0].capabilities.includes("approval:create")
+    );
+
+    // A parent sees only their own child, and no settings.
+    const parent = await me(avaParentUserId);
+
+    assert.deepEqual(parent.staff, []);
+    assert.deepEqual(parent.parentOf, [
+      { id: "integration-ava", firstName: "Ava" },
+    ]);
+
+    // Staff elsewhere see only their own setting's children.
+    const outsider = await me(outsideApproverUserId);
+
+    assert.deepEqual(
+      outsider.staff.map(
+        (membership: { settingId: string }) => membership.settingId
+      ),
+      ["other-setting"]
+    );
+    assert.ok(
+      !JSON.stringify(outsider).includes("integration-ava")
+    );
+  }
+);
+
+test(
+  "staff see each day's draft status, and nobody else does",
+  async () => {
+    resetGenerator();
+
+    const childId = "integration-ava";
+    const observationDate = "2026-10-20";
+
+    await createObservation(
+      childId,
+      observationDate,
+      "activity",
+      "Made a paper boat."
+    );
+
+    const generated = await generateFirstDraft(childId, observationDate);
+
+    assert.equal(generated.statusCode, 201, generated.body);
+
+    const { draft } = generated.json<GeneratedDraft>();
+
+    const statusFor = async (userId: string = practitionerUserId) => {
+      const response = await app.inject({
+        method: "GET",
+        url: `/children/${childId}/updates`,
+        headers: asUser(userId),
+      });
+
+      assert.equal(response.statusCode, 200, response.body);
+
+      const body = response.json();
+
+      assert.deepEqual(body.child, {
+        id: childId,
+        firstName: "Ava",
+      });
+
+      return body.updates.find(
+        (update: { observationDate: string }) =>
+          update.observationDate === observationDate
+      );
+    };
+
+    let update = await statusFor();
+
+    assert.equal(update.status, "draft");
+    assert.equal(update.id, draft.update_id);
+    assert.deepEqual(
+      {
+        id: update.revision.id,
+        number: update.revision.number,
+        text: update.revision.text,
+        generated: update.revision.generated,
+      },
+      {
+        id: draft.id,
+        number: 1,
+        text: "Made a paper boat.",
+        generated: true,
+      }
+    );
+
+    const review = await app.inject({
+      method: "POST",
+      url: `/revisions/${draft.id}/content-reviews`,
+    });
+
+    assert.equal(review.statusCode, 201, review.body);
+
+    update = await statusFor();
+    assert.equal(update.status, "reviewed");
+    assert.equal(update.review.verdict, "supported");
+    assert.equal(update.review.coverageVerdict, "complete");
+
+    const evaluation = await app.inject({
+      method: "POST",
+      url: `/revisions/${draft.id}/evaluations`,
+    });
+
+    assert.equal(evaluation.statusCode, 201, evaluation.body);
+
+    const evaluationId = evaluation.json().evaluationId;
+
+    update = await statusFor();
+    assert.equal(update.status, "ready_for_approval");
+    assert.equal(update.evaluation.id, evaluationId);
+    assert.equal(update.evaluation.results.length, 5);
+
+    const approval = await approve(evaluationId);
+
+    assert.equal(approval.statusCode, 201, approval.body);
+
+    update = await statusFor();
+    assert.equal(update.status, "approved");
+
+    const publication = await publish(approval.json().approval.id);
+
+    assert.equal(publication.statusCode, 201, publication.body);
+
+    // Approvers see the same view.
+    update = await statusFor(integrationUserId);
+    assert.equal(update.status, "published");
+    assert.equal(update.publication.revisionId, draft.id);
+
+    // A later edit is a new draft, not the published one.
+    const edit = await app.inject({
+      method: "POST",
+      url: `/updates/${draft.update_id}/revisions`,
+      payload: {
+        expectedRevision: 1,
+        text: "Made a paper boat and sailed it.",
+        refreshSources: false,
+      },
+    });
+
+    assert.equal(edit.statusCode, 201, edit.body);
+
+    update = await statusFor();
+    assert.equal(update.status, "draft");
+    assert.equal(update.revision.number, 2);
+    assert.equal(update.publication.revisionId, draft.id);
+
+    // Parents, other settings, and unknown children are refused.
+    for (const [userId, url] of [
+      [avaParentUserId, `/children/${childId}/updates`],
+      [outsideApproverUserId, `/children/${childId}/updates`],
+      [practitionerUserId, "/children/other-child/updates"],
+      [practitionerUserId, "/children/no-such-child/updates"],
+    ] as const) {
+      const refused = await app.inject({
+        method: "GET",
+        url,
+        headers: asUser(userId),
+      });
+
+      assert.equal(refused.statusCode, 403, `${userId} ${url}`);
+      assert.deepEqual(refused.json(), {
+        error: "Not permitted to read updates for this child",
+      });
+    }
+  }
+);
+
+test(
+  "the approval queue lists eligible drafts for approvers only",
+  async () => {
+    resetGenerator();
+
+    const childId = "integration-ava";
+    const observationDate = "2026-10-21";
+
+    await createObservation(
+      childId,
+      observationDate,
+      "food",
+      "Ate a banana."
+    );
+
+    const generated = await generateFirstDraft(childId, observationDate);
+
+    assert.equal(generated.statusCode, 201, generated.body);
+
+    const { draft } = generated.json<GeneratedDraft>();
+
+    await app.inject({
+      method: "POST",
+      url: `/revisions/${draft.id}/content-reviews`,
+    });
+
+    const queueFor = async (userId: string) => {
+      const response = await app.inject({
+        method: "GET",
+        url: "/approval-queue",
+        headers: asUser(userId),
+      });
+
+      assert.equal(response.statusCode, 200, response.body);
+
+      return response.json<{
+        items: {
+          updateId: string;
+          childId: string;
+          observationDate: string;
+          revision: { id: string; text: string };
+          notes: { category: string; text: string }[];
+          evaluation: { id: string; decision: string };
+          review: { verdict: string } | null;
+          approval: { id: string } | null;
+        }[];
+      }>().items;
+    };
+
+    const inQueue = async (userId: string = integrationUserId) =>
+      (await queueFor(userId)).find(
+        (item) => item.updateId === draft.update_id
+      );
+
+    // Reviewed but not yet evaluated: not ready.
+    assert.equal(await inQueue(), undefined);
+
+    const evaluation = await app.inject({
+      method: "POST",
+      url: `/revisions/${draft.id}/evaluations`,
+    });
+
+    const evaluationId = evaluation.json().evaluationId;
+
+    const waiting = await inQueue();
+
+    assert.ok(waiting);
+    assert.equal(waiting.childId, childId);
+    assert.equal(waiting.observationDate, observationDate);
+    assert.equal(waiting.revision.id, draft.id);
+    assert.equal(waiting.revision.text, "Ate a banana.");
+    assert.deepEqual(waiting.notes, [
+      { category: "food", text: "Ate a banana." },
+    ]);
+    assert.equal(waiting.evaluation.id, evaluationId);
+    assert.equal(waiting.review?.verdict, "supported");
+    assert.equal(waiting.approval, null);
+
+    // Practitioners, parents and other settings have no queue items.
+    assert.deepEqual(await queueFor(practitionerUserId), []);
+    assert.deepEqual(await queueFor(avaParentUserId), []);
+    assert.equal(await inQueue(outsideApproverUserId), undefined);
+
+    // Approved but unpublished drafts stay, showing the approval.
+    const approval = await approve(evaluationId);
+    const approvalId = approval.json().approval.id;
+
+    assert.equal((await inQueue())?.approval?.id, approvalId);
+
+    // Published drafts leave the queue.
+    await publish(approvalId);
+
+    assert.equal(await inQueue(), undefined);
+  }
+);
+
+test(
+  "a draft that needs review stays out of the approval queue",
+  async () => {
+    resetGenerator();
+
+    const childId = "integration-ava";
+    const observationDate = "2026-10-22";
+
+    await createObservation(
+      childId,
+      observationDate,
+      "activity",
+      "Drew a cat."
+    );
+
+    const draftResponse = await app.inject({
+      method: "POST",
+      url: "/drafts",
+      payload: {
+        childId,
+        observationDate,
+        text: `Drew a cat. Also ${inventedIdTrigger}.`,
+      },
+    });
+
+    const draftId = draftResponse.json().draft.id;
+
+    await app.inject({
+      method: "POST",
+      url: `/revisions/${draftId}/content-reviews`,
+    });
+
+    const evaluation = await app.inject({
+      method: "POST",
+      url: `/revisions/${draftId}/evaluations`,
+    });
+
+    assert.equal(evaluation.json().decision, "needs_review");
+
+    const queue = await app.inject({
+      method: "GET",
+      url: "/approval-queue",
+    });
+
+    assert.ok(
+      !queue
+        .json<{ items: { revision: { id: string } }[] }>()
+        .items.some((item) => item.revision.id === draftId)
+    );
+
+    const updates = await app.inject({
+      method: "GET",
+      url: `/children/${childId}/updates`,
+    });
+
+    const update = updates
+      .json<{ updates: { observationDate: string; status: string }[] }>()
+      .updates.find((item) => item.observationDate === observationDate);
+
+    assert.equal(update?.status, "needs_review");
+  }
+);
+
+test(
+  "each draft version gets one review, so checks cannot be re-rolled",
+  async () => {
+    resetGenerator();
+    reviewerFailure = null;
+
+    const childId = "integration-ava";
+    const observationDate = "2026-10-23";
+
+    await createObservation(
+      childId,
+      observationDate,
+      "activity",
+      "Planted a bean."
+    );
+
+    const generated = await generateFirstDraft(childId, observationDate);
+    const { draft } = generated.json<GeneratedDraft>();
+    const reviewUrl = `/revisions/${draft.id}/content-reviews`;
+
+    // A failed review does not count, and can be retried.
+    reviewerFailure = new Error("Provider unavailable");
+
+    const failed = await app.inject({ method: "POST", url: reviewUrl });
+
+    assert.notEqual(failed.statusCode, 201, failed.body);
+    reviewerFailure = null;
+
+    // Several requests at once: exactly one review happens.
+    const callsBefore = reviewerCallCount;
+
+    const attempts = await Promise.all(
+      [1, 2, 3].map(() =>
+        app.inject({ method: "POST", url: reviewUrl })
+      )
+    );
+
+    const statuses = attempts.map((attempt) => attempt.statusCode).sort();
+
+    assert.deepEqual(statuses, [201, 409, 409], JSON.stringify(
+      attempts.map((attempt) => attempt.body)
+    ));
+    assert.equal(reviewerCallCount, callsBefore + 1);
+
+    // Asking again later is refused, without calling the reviewer.
+    const again = await app.inject({ method: "POST", url: reviewUrl });
+
+    assert.equal(again.statusCode, 409);
+    assert.deepEqual(again.json(), {
+      error:
+        "This version has already been checked. " +
+        "Change the draft to check it again.",
+    });
+    assert.equal(reviewerCallCount, callsBefore + 1);
+
+    const reviews = await pool.query<{ status: string }>(
+      `SELECT status
+       FROM content_reviews
+       WHERE draft_revision_id = $1
+       ORDER BY created_at`,
+      [draft.id]
+    );
+
+    assert.deepEqual(
+      reviews.rows.map((row) => row.status),
+      ["error", "completed"]
+    );
+
+    // The database refuses a second review too.
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO content_reviews (
+           draft_revision_id,
+           requested_model,
+           rubric_version,
+           rubric_text,
+           input_snapshot,
+           requested_by
+         )
+         SELECT
+           draft_revision_id,
+           requested_model,
+           rubric_version,
+           rubric_text,
+           input_snapshot,
+           requested_by
+         FROM content_reviews
+         WHERE draft_revision_id = $1
+           AND status = 'completed'`,
+        [draft.id]
+      ),
+      /already been reviewed/
+    );
+
+    // Changing the draft makes a new version, which can be checked.
+    const edit = await app.inject({
+      method: "POST",
+      url: `/updates/${draft.update_id}/revisions`,
+      payload: {
+        expectedRevision: 1,
+        text: "Planted a bean in a pot.",
+        refreshSources: false,
+      },
+    });
+
+    assert.equal(edit.statusCode, 201, edit.body);
+
+    const newReview = await app.inject({
+      method: "POST",
+      url: `/revisions/${edit.json().draft.id}/content-reviews`,
+    });
+
+    assert.equal(newReview.statusCode, 201, newReview.body);
   }
 );

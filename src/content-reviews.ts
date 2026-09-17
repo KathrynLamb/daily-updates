@@ -105,50 +105,91 @@ export async function contentReviewRoutes(
         draft: revision.text,
       };
 
+      // One review per draft version (migration 020). Checked here for a
+      // clear message; the database enforces it for simultaneous requests.
+      const earlier = await pool.query<{ status: string }>(
+        `SELECT status
+         FROM content_reviews
+         WHERE draft_revision_id = $1
+           AND requested_model = $2
+           AND rubric_version = $3
+           AND rubric_text = $4
+           AND status IN ('running', 'completed')
+         ORDER BY created_at DESC
+         LIMIT 1`,
+        [revision.id, reviewModel, rubricVersion, rubric]
+      );
+
+      const alreadyReviewed = (status?: string) =>
+        reply.code(409).send({
+          error:
+            status === "running"
+              ? "This version is already being checked."
+              : "This version has already been checked. " +
+                "Change the draft to check it again.",
+        });
+
+      if (earlier.rows[0]) {
+        return alreadyReviewed(earlier.rows[0].status);
+      }
+
       // Recheck access atomically while recording the attempt.
       // If access was revoked after the initial read, no durable
       // attempt is created and the model is never called.
-      const attempts = await pool.query<{ id: string }>(
-        `INSERT INTO content_reviews (
-           draft_revision_id,
-           requested_model,
-           rubric_version,
-           rubric_text,
-           input_snapshot,
-           requested_by
-         )
-         SELECT
-           r.id,
-           $4,
-           $5,
-           $6,
-           $7::jsonb,
-           -- The member whose access this row just proved.
-           sm.user_id
-         FROM draft_revisions r
-         JOIN updates u
-           ON u.id = r.update_id
-         JOIN children c
-           ON c.id = u.child_id
-         JOIN setting_memberships sm
-           ON sm.setting_id = c.setting_id
-         JOIN app_users au
-           ON au.id = sm.user_id
-         WHERE r.id = $1
-           AND sm.user_id = $2
-           AND sm.role = ANY($3::text[])
-           AND au.disabled_at IS NULL
-         RETURNING id`,
-        [
-          revision.id,
-          actor.userId,
-          permittedRoles,
-          reviewModel,
-          rubricVersion,
-          rubric,
-          JSON.stringify(input),
-        ]
-      );
+      let attempts;
+
+      try {
+        attempts = await pool.query<{ id: string }>(
+          `INSERT INTO content_reviews (
+             draft_revision_id,
+             requested_model,
+             rubric_version,
+             rubric_text,
+             input_snapshot,
+             requested_by
+           )
+           SELECT
+             r.id,
+             $4,
+             $5,
+             $6,
+             $7::jsonb,
+             -- The member whose access this row just proved.
+             sm.user_id
+           FROM draft_revisions r
+           JOIN updates u
+             ON u.id = r.update_id
+           JOIN children c
+             ON c.id = u.child_id
+           JOIN setting_memberships sm
+             ON sm.setting_id = c.setting_id
+           JOIN app_users au
+             ON au.id = sm.user_id
+           WHERE r.id = $1
+             AND sm.user_id = $2
+             AND sm.role = ANY($3::text[])
+             AND au.disabled_at IS NULL
+           RETURNING id`,
+          [
+            revision.id,
+            actor.userId,
+            permittedRoles,
+            reviewModel,
+            rubricVersion,
+            rubric,
+            JSON.stringify(input),
+          ]
+        );
+      } catch (error) {
+        if (
+          (error as { constraint?: string }).constraint ===
+          "content_reviews_one_per_revision"
+        ) {
+          return alreadyReviewed("running");
+        }
+
+        throw error;
+      }
 
       const attempt = attempts.rows[0];
 
