@@ -27,6 +27,12 @@
       "favicon": "./assets/favicon.png",
       "name": "Daily Updates"
     },
-    "scheme": "dailyupdates"
+    "scheme": "dailyupdates",
+    "extra": {
+      "eas": {
+        "projectId": "804ddb76-a219-4781-aaf0-3b740eacb4e0"
+      }
+    },
+    "owner": "katylamb2000"
   }
 }
