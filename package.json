@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
+    "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
+    "db:migrate": "tsx scripts/migrate.ts",
+    "db:seed:demo": "tsx scripts/seed-demo.ts",
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/*.test.ts",
     "test:integration": "bash scripts/test-integration.sh",

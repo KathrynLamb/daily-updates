@@ -9,5 +9,5 @@
   },
   // Tests are included so type checking covers them too, and so the
   // editor checks them with these settings rather than its defaults.
-  "include": ["src/**/*.ts", "test/**/*.ts"]
+  "include": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.ts"]
 }
