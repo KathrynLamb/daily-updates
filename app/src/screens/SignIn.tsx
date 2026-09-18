@@ -10,9 +10,9 @@ export function SignIn() {
     <Screen>
       <Title>Daily Updates</Title>
       <Body>
-        Turn the day's notes into a checked, approved update for each
-        child's family.
+        Share the small moments that help families feel part of their child’s day.
       </Body>
+      <Body muted>Capture what happened, create a warm family update, and keep a person in control before anything is sent.</Body>
       {state.status === "signed_out" && state.message ? (
         <Notice tone="attention">{state.message}</Notice>
       ) : null}
@@ -20,7 +20,7 @@ export function SignIn() {
         <Notice tone="problem">{state.message}</Notice>
       ) : null}
       <Button
-        label="Log in"
+        label="Continue to Daily Updates"
         onPress={logIn}
         disabled={!canLogIn}
         busy={state.status === "signing_in"}
