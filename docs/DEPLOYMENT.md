@@ -42,7 +42,7 @@ In the Native application's settings add this value to both **Allowed Callback
 URLs** and **Allowed Logout URLs**:
 
 ```text
-dailyupdates://
+dailyupdates://auth/callback
 ```
 
 The mobile Client ID is public. Do not put the Auth0 Client Secret into Expo.
