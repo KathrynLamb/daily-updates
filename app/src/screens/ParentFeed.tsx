@@ -40,6 +40,7 @@ export function ParentFeed({ child }: { child: ChildSummary }) {
   return (
     <Screen>
       <Title>{child.firstName}'s days</Title>
+      <Body muted>The everyday discoveries, conversations and little moments shared by your childminder.</Body>
       {problem ? <Notice tone="problem">{problem}</Notice> : null}
       {updates === null && !problem ? (
         <Loading />
@@ -52,13 +53,18 @@ export function ParentFeed({ child }: { child: ChildSummary }) {
           <View
             key={update.id}
             style={{
-              gap: 6,
-              paddingBottom: 20,
-              borderBottomWidth: 1,
-              borderBottomColor: colours.line,
+              gap: 12,
+              padding: 20,
+              borderRadius: 20,
+              borderWidth: 1,
+              borderColor: colours.line,
+              backgroundColor: colours.surface,
             }}
           >
-            <Heading>{formatDay(update.observation_date)}</Heading>
+            <View style={{ gap: 2 }}>
+              <Heading>{formatDay(update.observation_date)}</Heading>
+              <Body muted>A moment from {child.firstName}'s day</Body>
+            </View>
             <Body>{update.text}</Body>
           </View>
         ))

@@ -25,20 +25,25 @@ import {
 } from "react-native";
 
 export const colours = {
-  page: "#F6FAF8",
+  page: "#F8F7FC",
   surface: "#FFFFFF",
-  ink: "#1E2A36",
-  muted: "#5B6B78",
-  line: "#D5E0DB",
-  leaf: "#2E7D5B",
+  ink: "#16123D",
+  muted: "#5E5E7A",
+  line: "#E4E4EB",
+  coral: "#EF5C72",
+  coralPressed: "#D94D65",
+  blush: "#FFF1F2",
+  lavender: "#EFEFFC",
+  violet: "#474775",
+  leaf: "#287A5B",
   leafSoft: "#E1F1E9",
-  marigold: "#E9A23B",
+  marigold: "#D98B25",
   marigoldSoft: "#FCF0DC",
   marigoldInk: "#7A4E0B",
   berry: "#B23A64",
   berrySoft: "#F8E3EB",
-  sky: "#E3F0F6",
-  skyLine: "#B9D6E4",
+  sky: "#EEF5FB",
+  skyLine: "#C8DCEC",
 };
 
 export const fonts = {
@@ -163,7 +168,7 @@ export function Button({
     >
       {busy ? (
         <ActivityIndicator
-          color={variant === "primary" ? colours.surface : colours.leaf}
+          color={variant === "primary" ? colours.surface : colours.coral}
         />
       ) : (
         <Text
@@ -411,7 +416,7 @@ export function shiftIso(isoDate: string, days: number): string {
 const styles = StyleSheet.create({
   page: { flex: 1, backgroundColor: colours.page },
   pageContent: { paddingHorizontal: 20, paddingVertical: 28 },
-  column: { width: "100%", maxWidth: 720, alignSelf: "center", gap: 20 },
+  column: { width: "100%", maxWidth: 760, alignSelf: "center", gap: 20 },
   title: {
     fontFamily: fonts.bold,
     fontSize: 32,
@@ -443,25 +448,25 @@ const styles = StyleSheet.create({
     minHeight: 48,
     paddingHorizontal: 20,
     paddingVertical: 12,
-    borderRadius: 12,
+    borderRadius: 10,
     alignItems: "center",
     justifyContent: "center",
     borderWidth: 2,
     borderColor: "transparent",
   },
-  buttonPrimary: { backgroundColor: colours.leaf },
+  buttonPrimary: { backgroundColor: colours.coral },
   buttonSecondary: {
     backgroundColor: colours.surface,
-    borderColor: colours.leaf,
+    borderColor: colours.ink,
   },
   buttonQuiet: { backgroundColor: "transparent", paddingHorizontal: 8 },
   backRow: { marginLeft: -8, marginBottom: -12 },
-  buttonPressed: { opacity: 0.8 },
+  buttonPressed: { opacity: 0.82, transform: [{ scale: 0.99 }] },
   buttonInactive: { opacity: 0.45 },
   buttonLabel: {
     fontFamily: fonts.bold,
     fontSize: 16,
-    color: colours.leaf,
+    color: colours.ink,
   },
   buttonLabelPrimary: { color: colours.surface },
   focusRing: {
@@ -471,10 +476,10 @@ const styles = StyleSheet.create({
   buttonRow: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
   section: {
     backgroundColor: colours.surface,
-    borderRadius: 16,
+    borderRadius: 20,
     borderWidth: 1,
     borderColor: colours.line,
-    padding: 20,
+    padding: 22,
     gap: 14,
   },
   claudePanel: {
@@ -518,11 +523,11 @@ const styles = StyleSheet.create({
     backgroundColor: colours.surface,
   },
   choiceSelected: {
-    borderColor: colours.leaf,
-    backgroundColor: colours.leafSoft,
+    borderColor: colours.coral,
+    backgroundColor: colours.blush,
   },
   choiceLabel: { fontFamily: fonts.regular, fontSize: 15, color: colours.ink },
-  choiceLabelSelected: { fontFamily: fonts.bold, color: colours.leaf },
+  choiceLabelSelected: { fontFamily: fonts.bold, color: colours.ink },
   rail: { flexDirection: "row", paddingVertical: 4 },
   railStep: { flex: 1, alignItems: "center", gap: 6 },
   railTrack: { flexDirection: "row", alignItems: "center", width: "100%" },

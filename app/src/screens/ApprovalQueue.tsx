@@ -8,12 +8,12 @@ import { useCallback, useEffect, useState } from "react";
 import { View } from "react-native";
 import { ApiError } from "../api";
 import { useAuth } from "../auth";
+import { FamilyPreview } from "../components/FamilyPreview";
 import type { QueueItem } from "../types";
 import {
   Body,
   Button,
   ButtonRow,
-  ClaudePanel,
   formatDay,
   Heading,
   Loading,
@@ -90,6 +90,7 @@ export function ApprovalQueue() {
   return (
     <Screen>
       <Title>Waiting for approval</Title>
+      <Body muted>Read the family update beside the notes it came from. Approval and sending stay separate.</Body>
       {message ? <Notice tone={message.tone}>{message.text}</Notice> : null}
 
       {items === null ? (
@@ -103,26 +104,17 @@ export function ApprovalQueue() {
         items.map((item) => (
           <Section key={item.updateId}>
             <View style={{ gap: 2 }}>
+              <Small>{item.settingName.toUpperCase()}</Small>
               <Heading>{item.childFirstName}</Heading>
-              <Small>
-                {formatDay(item.observationDate)}, {item.settingName}
-              </Small>
+              <Body muted>{formatDay(item.observationDate)}</Body>
             </View>
-            <View style={{ gap: 6 }}>
-              <Small>Notes it was written from</Small>
+            <View style={{ gap: 10 }}>
+              <Small>SOURCE NOTES</Small>
               {item.notes.map((note, index) => (
-                <Body key={index}>{note.text}</Body>
+                <View key={index} style={{ padding: 12, borderRadius: 12, backgroundColor: "#EFEFFC" }}><Body>{note.text}</Body></View>
               ))}
             </View>
-            <ClaudePanel
-              label={
-                item.revision.generated
-                  ? "Update written by Claude, checked"
-                  : "Update edited by staff, checked"
-              }
-            >
-              <Body>{item.revision.text}</Body>
-            </ClaudePanel>
+            <FamilyPreview text={item.revision.text} noteCount={item.notes.length} generated={item.revision.generated} version={item.revision.number} />
             {item.review?.reason ? (
               <Small>Claude's review: {item.review.reason}</Small>
             ) : null}
@@ -134,9 +126,7 @@ export function ApprovalQueue() {
                 disabled={busy !== null && busy !== item.updateId}
               />
             </ButtonRow>
-            {item.approval ? (
-              <Small>Approved. Not sent yet.</Small>
-            ) : null}
+            {item.approval ? <Notice tone="attention">Approved. The family cannot see it until you choose Send to family.</Notice> : <Small>Your approval confirms that a person has read this exact version.</Small>}
           </Section>
         ))
       )}
