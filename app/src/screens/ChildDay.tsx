@@ -4,76 +4,52 @@
 // and, for approvers, approving and sending it to the family.
 
 import { useCallback, useEffect, useState } from "react";
-import { Text, View } from "react-native";
+import { View } from "react-native";
 import { ApiError } from "../api";
 import { useAuth } from "../auth";
 import type {
   ChildSummary,
   Observation,
   ObservationCategory,
-  RuleResult,
   StaffMembership,
   StaffUpdate,
 } from "../types";
+import { CheckSummary } from "../components/CheckSummary";
+import { DayNavigation } from "../components/DayNavigation";
+import { FamilyPreview } from "../components/FamilyPreview";
+import { ObservationCard } from "../components/ObservationCard";
 import {
   Body,
   Button,
   ButtonRow,
   Choice,
-  ClaudePanel,
-  colours,
   Field,
-  fonts,
-  formatDay,
   Heading,
   Loading,
   Notice,
-  ProgressRail,
   Screen,
   Section,
-  shiftIso,
   Small,
   Title,
   todayIso,
-  type RailState,
 } from "../ui";
 
-const categories: { value: ObservationCategory; label: string }[] = [
-  { value: "activity", label: "Activity" },
-  { value: "food", label: "Food" },
-  { value: "sleep", label: "Sleep" },
-  { value: "general", label: "Other" },
+type MomentKind = "discovery" | "voice" | "connection" | "other";
+
+const momentKinds: { value: MomentKind; label: string }[] = [
+  { value: "discovery", label: "Tried or discovered" },
+  { value: "voice", label: "Said or wondered" },
+  { value: "connection", label: "Connected with someone" },
+  { value: "other", label: "Something else" },
 ];
 
-const ruleNames: Record<string, string> = {
-  text_length: "Length",
-  source_presence: "Based on notes",
-  source_freshness: "Notes unchanged",
-  content_grounding: "Only what was observed",
-  content_coverage: "Covers every note",
+const categoryForMoment: Record<MomentKind, ObservationCategory> = {
+  discovery: "activity",
+  voice: "general",
+  connection: "general",
+  other: "general",
 };
 
-function railFor(notes: number, update: StaffUpdate | undefined): RailState {
-  if (!update) {
-    return { reached: notes > 0 ? 0 : -1, tone: "good" };
-  }
-
-  switch (update.status) {
-    case "published":
-      return { reached: 4, tone: "good" };
-    case "approved":
-      return { reached: 3, tone: "good" };
-    case "ready_for_approval":
-      return { reached: 2, tone: "good" };
-    case "needs_review":
-    case "evaluation_failed":
-      return { reached: 2, tone: "attention" };
-    case "blocked":
-      return { reached: 2, tone: "problem" };
-    default:
-      return { reached: 1, tone: "good" };
-  }
-}
 
 export function ChildDay({
   child,
@@ -94,7 +70,7 @@ export function ChildDay({
     text: string;
   } | null>(null);
 
-  const [category, setCategory] = useState<ObservationCategory>("activity");
+  const [momentKind, setMomentKind] = useState<MomentKind>("discovery");
   const [noteText, setNoteText] = useState("");
   const [editing, setEditing] = useState(false);
   const [draftText, setDraftText] = useState("");
@@ -157,7 +133,6 @@ export function ChildDay({
   }
 
   const hasNotes = (notes?.length ?? 0) > 0;
-  const rail = railFor(notes?.length ?? 0, update);
 
   const addNote = () =>
     run(
@@ -166,12 +141,12 @@ export function ChildDay({
         await api.post("/observations", {
           childId: child.id,
           observationDate: date,
-          category,
+          category: categoryForMoment[momentKind],
           text: noteText.trim(),
         });
         setNoteText("");
       },
-      update ? "Note added. Rewrite or edit the draft to include it." : undefined
+      update ? "Moment saved. Create another version to include it in the family update." : "Moment saved. You can get straight back to the children."
     );
 
   const writeDraft = () =>
@@ -239,23 +214,12 @@ export function ChildDay({
   return (
     <Screen>
       <View style={{ gap: 4 }}>
+        <Small>{membership.settingName.toUpperCase()}</Small>
         <Title>{child.firstName}</Title>
-        <Body muted>{membership.settingName}</Body>
+        <Body muted>{hasNotes ? `${notes?.length} ${notes?.length === 1 ? "moment" : "moments"} captured. Add another in a few words, or shape the update below.` : "Capture only the detail that someone who knows them would notice."}</Body>
       </View>
 
-      <View style={{ gap: 12 }}>
-        <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
-          <Heading>{formatDay(date)}</Heading>
-          <ButtonRow>
-            <Button label="Previous day" variant="quiet" onPress={() => setDate(shiftIso(date, -1))} />
-            {date !== todayIso() ? (
-              <Button label="Today" variant="quiet" onPress={() => setDate(todayIso())} />
-            ) : null}
-            <Button label="Next day" variant="quiet" onPress={() => setDate(shiftIso(date, 1))} />
-          </ButtonRow>
-        </View>
-        <ProgressRail {...rail} />
-      </View>
+      <DayNavigation date={date} onChange={setDate} />
 
       {message ? <Notice tone={message.tone}>{message.text}</Notice> : null}
 
@@ -264,48 +228,46 @@ export function ChildDay({
       ) : (
         <>
           <Section>
-            <Heading>Notes</Heading>
+            <View style={{ gap: 3 }}><Small>QUICK CAPTURE</Small><Heading>What did you notice?</Heading></View>
             {notes.length === 0 ? (
-              <Body muted>No notes for this day yet. Add the first one below.</Body>
+              <Body muted>A short phrase is enough. Save the detail now and shape it for the family later.</Body>
             ) : (
-              notes.map((note) => (
-                <View key={note.id} style={{ gap: 2 }}>
-                  <Small>{categories.find((item) => item.value === note.category)?.label}</Small>
-                  <Body>{note.text}</Body>
-                </View>
-              ))
+              notes.map((note) => <ObservationCard key={note.id} observation={note} />)
             )}
-            <Choice label="Type" options={categories} value={category} onChange={setCategory} />
+            <Choice label="This moment was about…" options={momentKinds} value={momentKind} onChange={setMomentKind} />
             <Field
-              label="What happened"
+              label="What did you notice?"
               value={noteText}
               onChangeText={setNoteText}
-              placeholder="Built a tower with wooden blocks."
+              placeholder="Ava rebuilt her tower twice, then called Mia over to see it."
               multiline
             />
+            <Small>Use your own words. The original is always kept, even if you create a family-friendly version later.</Small>
             <ButtonRow>
               <Button
-                label="Add note"
-                variant="secondary"
+                label="Save moment"
                 onPress={addNote}
                 disabled={noteText.trim().length === 0}
                 busy={busy === "note"}
               />
             </ButtonRow>
+            <View style={{ paddingTop: 4 }}>
+              <Notice tone="attention">This space is only for family-shareable moments. Record accidents, medication and safeguarding concerns in your setting’s required system.</Notice>
+            </View>
           </Section>
 
           <Section>
-            <Heading>Update for the family</Heading>
+            <View style={{ gap: 3 }}><Small>WHEN YOU HAVE A QUIET MOMENT</Small><Heading>Shape the family update</Heading></View>
 
             {!update ? (
               <>
                 <Body muted>
                   {hasNotes
-                    ? `Claude will write a short update from these notes for you to check.`
-                    : "Add at least one note, then Claude can write the update."}
+                    ? `Turn ${notes?.length} ${notes?.length === 1 ? "moment" : "moments"} into a concise update. Nothing is sent until a person reviews it.`
+                    : "Add at least one moment before creating the family update."}
                 </Body>
                 <ButtonRow>
-                  <Button label="Write draft" onPress={writeDraft} disabled={!hasNotes} busy={busy === "write"} />
+                  <Button label="Create family update" onPress={writeDraft} disabled={!hasNotes} busy={busy === "write"} />
                 </ButtonRow>
               </>
             ) : editing ? (
@@ -318,16 +280,7 @@ export function ChildDay({
               </>
             ) : (
               <>
-                {update.revision.generated ? (
-                  <ClaudePanel label={`Written by Claude, version ${update.revision.number}`}>
-                    <Body>{update.revision.text}</Body>
-                  </ClaudePanel>
-                ) : (
-                  <View style={{ gap: 4 }}>
-                    <Small>Edited by staff, version {update.revision.number}</Small>
-                    <Body>{update.revision.text}</Body>
-                  </View>
-                )}
+                <FamilyPreview text={update.revision.text} noteCount={notes.length} generated={update.revision.generated} version={update.revision.number} />
 
                 {update.status === "published" ? (
                   <Notice tone="good">Sent to {child.firstName}'s family.</Notice>
@@ -354,7 +307,7 @@ export function ChildDay({
                       setEditing(true);
                     }}
                   />
-                  <Button label="Rewrite with Claude" variant="secondary" onPress={writeDraft} busy={busy === "write"} />
+                  <Button label="Create another version" variant="secondary" onPress={writeDraft} busy={busy === "write"} />
                 </ButtonRow>
 
                 {update.status === "ready_for_approval" && !canApprove ? (
@@ -364,72 +317,10 @@ export function ChildDay({
             )}
           </Section>
 
-          {update && !editing ? <CheckResults update={update} /> : null}
+          {update && !editing ? <CheckSummary update={update} /> : null}
         </>
       )}
     </Screen>
-  );
-}
-
-function CheckResults({ update }: { update: StaffUpdate }) {
-  const evaluation = update.evaluation;
-
-  if (!evaluation || evaluation.status !== "completed") {
-    if (update.review?.status === "completed") {
-      return (
-        <Section>
-          <Heading>Checks</Heading>
-          <Body muted>Claude has reviewed the draft. Press Check draft to finish the checks.</Body>
-        </Section>
-      );
-    }
-
-    return null;
-  }
-
-  const summary =
-    evaluation.decision === "eligible"
-      ? { tone: "good" as const, text: "Every check passed. This version can be approved." }
-      : evaluation.decision === "blocked"
-        ? { tone: "problem" as const, text: "This version can't be sent as written. Edit it or rewrite it, then check again." }
-        : { tone: "attention" as const, text: "A person needs to look at this before it can be approved. Edit it or rewrite it, then check again." };
-
-  return (
-    <Section>
-      <Heading>Checks</Heading>
-      <Notice tone={summary.tone}>{summary.text}</Notice>
-      {evaluation.results.map((result) => (
-        <RuleLine key={result.ruleId} result={result} />
-      ))}
-    </Section>
-  );
-}
-
-function RuleLine({ result }: { result: RuleResult }) {
-  const passed = result.outcome === "pass";
-  const colour =
-    result.outcome === "pass"
-      ? colours.leaf
-      : result.outcome === "fail"
-        ? colours.berry
-        : colours.marigoldInk;
-  const word =
-    result.outcome === "pass"
-      ? "Passed"
-      : result.outcome === "fail"
-        ? "Failed"
-        : result.outcome === "review"
-          ? "Needs a person"
-          : "Couldn't check";
-
-  return (
-    <View style={{ gap: 2, borderLeftWidth: 3, borderLeftColor: colour, paddingLeft: 12 }}>
-      <Text style={{ fontFamily: fonts.bold, fontSize: 16, color: colours.ink }}>
-        {ruleNames[result.ruleId] ?? result.ruleId}{" "}
-        <Text style={{ color: colour }}>{word}</Text>
-      </Text>
-      {passed ? null : <Small>{result.reason}</Small>}
-    </View>
   );
 }
 
