@@ -62,7 +62,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const discovery = useAutoDiscovery(config.authDiscoveryUrl);
   // Keep the native callback stable across local, preview and store builds.
   // Web builds still use their current browser URL.
-  const redirectUri = makeRedirectUri({ scheme: "dailyupdates" });
+  const redirectUri = makeRedirectUri({
+    scheme: "dailyupdates",
+    path: "auth/callback",
+  });
   const [state, setState] = useState<AuthState>({ status: "signed_out" });
 
   const [request, response, promptAsync] = useAuthRequest(
