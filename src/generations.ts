@@ -36,6 +36,7 @@ import type {
     generateDraft,
     type DraftGenerator,
   } from "./draft-generator.js";
+  import { APIError } from "@anthropic-ai/sdk";
   
   const generateDraftSchema = z.strictObject({
     childId: z.string().trim().min(1),
@@ -275,29 +276,38 @@ import type {
       );
   
       return result;
-    } catch (error) {
-      const category =
-        error instanceof Error ? error.name : "UnknownError";
-  
-      await pool.query(
-        `UPDATE draft_generations
-         SET status = 'error',
-             error_message = $2,
-             completed_at = now()
-         WHERE id = $1`,
-        [generationId, `Generation failed (${category})`]
-      );
-  
-      log.error(
-        {
-          generationId,
-          category,
-        },
-        "Draft generation failed"
-      );
-  
-      return null;
-    }
+
+} catch (error) {
+  const kind =
+    error instanceof Error ? error.constructor.name : typeof error;
+  const status =
+    error instanceof APIError ? error.status : undefined;
+  const detail =
+    error instanceof Error
+      ? error.message.slice(0, 500)
+      : String(error).slice(0, 500);
+
+  await pool.query(
+    `UPDATE draft_generations
+     SET status = 'error',
+         error_message = $2,
+         completed_at = now()
+     WHERE id = $1`,
+    [generationId, `Generation failed (${kind}${status ? ` ${status}` : ""})`]
+  );
+
+  log.error(
+    {
+      generationId,
+      kind,
+      status,
+      detail,
+    },
+    "Draft generation failed"
+  );
+
+  return null;
+}
   }
   
   // Saves the generated text and sources exactly as recorded, so the
