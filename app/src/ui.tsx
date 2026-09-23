@@ -139,6 +139,7 @@ type ButtonProps = {
   variant?: "primary" | "secondary" | "quiet";
   disabled?: boolean;
   busy?: boolean;
+  fullWidth?: boolean;
 };
 
 export function Button({
@@ -147,6 +148,7 @@ export function Button({
   variant = "primary",
   disabled,
   busy,
+  fullWidth,
 }: ButtonProps) {
   const inactive = disabled || busy;
 
@@ -158,6 +160,7 @@ export function Button({
       onPress={onPress}
       style={({ pressed, focused }) => [
         styles.button,
+        fullWidth && styles.buttonFullWidth,
         variant === "primary" && styles.buttonPrimary,
         variant === "secondary" && styles.buttonSecondary,
         variant === "quiet" && styles.buttonQuiet,
@@ -455,6 +458,7 @@ const styles = StyleSheet.create({
     borderColor: "transparent",
   },
   buttonPrimary: { backgroundColor: colours.coral },
+  buttonFullWidth: { width: "100%", alignSelf: "stretch" },
   buttonSecondary: {
     backgroundColor: colours.surface,
     borderColor: colours.ink,

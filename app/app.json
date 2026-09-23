@@ -8,7 +8,10 @@
     "userInterfaceStyle": "light",
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.kathrynlamb.dailyupdates"
+      "bundleIdentifier": "com.kathrynlamb.dailyupdates",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
     },
     "android": {
       "package": "com.kathrynlamb.dailyupdates",
@@ -27,6 +30,11 @@
       "favicon": "./assets/favicon.png",
       "name": "Daily Updates"
     },
-    "scheme": "dailyupdates"
+    "scheme": "dailyupdates",
+    "extra": {
+      "eas": {
+        "projectId": "804ddb76-a219-4781-aaf0-3b740eacb4e0"
+      }
+    }
   }
 }
